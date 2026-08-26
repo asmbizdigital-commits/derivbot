@@ -35,7 +35,7 @@ export default function Home() {
       <div className="brand"><span className="brand-mark"><Zap size={18}/></span><span>NEURAL<span>TRADE</span></span></div>
       <button className="close-mobile" onClick={() => setSidebar(false)} aria-label="Fermer le menu"><X/></button>
       <nav><p>ESPACE DE TRAVAIL</p><a className="active"><LayoutDashboard/> Vue d&apos;ensemble</a><a><Activity/> Marchés <span className="nav-badge">2</span></a><a><Target/> Positions</a><a><BarChart3/> Performance</a><p>SYSTÈME</p><a><BrainCircuit/> Modèle IA</a><a><ShieldCheck/> Gestion du risque</a><a><Settings2/> Configuration</a></nav>
-      <div className="account-card"><div className="account-row"><span className="pulse-dot"/><span><b>Deriv MT5</b><small>Compte démo requis</small></span></div><div className="account-meta"><span>Latence<b>— ms</b></span><span>EA<b>Hors ligne</b></span></div></div>
+      <div className="account-card"><div className="account-row"><span className="pulse-dot"/><span><b>Deriv MT5</b><small>Compte démo requis</small></span></div><div className="account-meta"><span>API<b className="green">Prête</b></span><span>EA<b>Hors ligne</b></span></div></div>
     </aside>
     <section className="workspace">
       <header className="topbar"><button className="menu-mobile" onClick={() => setSidebar(true)} aria-label="Ouvrir le menu"><Menu/></button><div><p className="eyebrow">CENTRE DE COMMANDE</p><h1>Bonjour, Trader</h1></div><div className="top-actions"><div className={`system-pill ${stopped ? "danger" : ""}`}><span/><b>{status}</b></div><Button className="emergency" onClick={() => setStopped(!stopped)}><Octagon/> {stopped ? "Réactiver" : "Arrêt d'urgence"}</Button><div className="avatar">PK</div></div></header>
@@ -47,7 +47,7 @@ export default function Home() {
         </div>
         <div className="grid-bottom"><section className="panel engine-panel"><div className="panel-head"><div><p className="eyebrow">AUTOMATISATION</p><h3>Moteur de trading</h3></div><Switch checked={autoTrade&&!stopped} disabled={stopped} onCheckedChange={setAutoTrade} aria-label="Activer le trading automatique"/></div><div className="engine-status"><Bot/><span><b>{stopped ? "Moteur arrêté" : autoTrade ? "Autonomie complète" : "Mode observation"}</b><small>{stopped ? "Aucun ordre ne peut être exécuté" : "Analyse continue 24h/24"}</small></span><span className="live"><Radio/> LIVE</span></div><div className="engine-grid"><span>Univers<b>V25 · V100</b></span><span>Risque / trade<b className="red">$10 max</b></span><span>Positions max<b>1 / indice</b></span><span>Compte<b>Démo</b></span></div></section>
           <section className="panel positions-panel"><div className="panel-head"><div><p className="eyebrow">EXÉCUTION</p><h3>Positions actives</h3></div><button className="text-button">Voir l&apos;historique <ChevronDown/></button></div><div className="empty-state"><div><Signal/><span/></div><b>Aucune position ouverte</b><small>Le moteur attend un signal ≥ 75/100 et une connexion EA active.</small></div></section></div>
-        <footer><span><span className="pulse-dot"/> Système opérationnel en simulation</span><span>Dernière analyse : à l&apos;instant · Modèle MVP 0.1</span></footer>
+        <footer><span><span className="pulse-dot"/> API sécurisée prête · EA non connecté</span><span>Moteur SMC/Risk v0.2 · Exécution réelle verrouillée</span></footer>
       </div>
     </section>
   </main>;
