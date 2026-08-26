@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Activity, BarChart3, Bot, BrainCircuit, ChevronDown, Gauge, LayoutDashboard, Menu, Octagon, Radio, Settings2, ShieldCheck, Signal, Sparkles, Target, WalletCards, X, Zap } from "lucide-react";
+import { Activity, BarChart3, Bot, BrainCircuit, ChevronDown, Download, Gauge, LayoutDashboard, Menu, Octagon, Radio, Settings2, ShieldCheck, Signal, Sparkles, Target, WalletCards, X, Zap } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 
@@ -47,7 +47,8 @@ export default function Home() {
         </div>
         <div className="grid-bottom"><section className="panel engine-panel"><div className="panel-head"><div><p className="eyebrow">AUTOMATISATION</p><h3>Moteur de trading</h3></div><Switch checked={autoTrade&&!stopped} disabled={stopped} onCheckedChange={setAutoTrade} aria-label="Activer le trading automatique"/></div><div className="engine-status"><Bot/><span><b>{stopped ? "Moteur arrêté" : autoTrade ? "Autonomie complète" : "Mode observation"}</b><small>{stopped ? "Aucun ordre ne peut être exécuté" : "Analyse continue 24h/24"}</small></span><span className="live"><Radio/> LIVE</span></div><div className="engine-grid"><span>Univers<b>V25 · V100</b></span><span>Risque / trade<b className="red">$10 max</b></span><span>Positions max<b>1 / indice</b></span><span>Compte<b>Démo</b></span></div></section>
           <section className="panel positions-panel"><div className="panel-head"><div><p className="eyebrow">EXÉCUTION</p><h3>Positions actives</h3></div><button className="text-button">Voir l&apos;historique <ChevronDown/></button></div><div className="empty-state"><div><Signal/><span/></div><b>Aucune position ouverte</b><small>Le moteur attend un signal ≥ 75/100 et une connexion EA active.</small></div></section></div>
-        <footer><span><span className="pulse-dot"/> API sécurisée prête · EA non connecté</span><span>Moteur SMC/Risk v0.2 · Exécution réelle verrouillée</span></footer>
+        <section className="download-band"><div><span className="download-icon"><Download/></span><span><b>Agent MT5 v0.30 disponible</b><small>EA MQL5 + guide d’installation · Compte démo uniquement</small></span></div><div><a href="/INSTALLATION-MT5.txt" download>Guide</a><a className="primary-download" href="/DerivAITraderEA.mq5" download><Download/> Télécharger l’EA</a></div></section>
+        <footer><span><span className="pulse-dot"/> API sécurisée prête · EA v0.30 disponible</span><span>Moteur SMC/Risk v0.3 · Exécution réelle verrouillée</span></footer>
       </div>
     </section>
   </main>;
