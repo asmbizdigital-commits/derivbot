@@ -20,6 +20,9 @@ export function getDerivLegacyAppId() {
 }
 
 export function getDerivOAuthRedirectUri(requestUrl: string) {
+  const configuredRedirectUri = process.env.DERIV_OAUTH_REDIRECT_URI?.trim();
+  if (configuredRedirectUri) return configuredRedirectUri;
+
   const url = new URL(requestUrl);
   return `${url.origin}/deriv-oauth/callback`;
 }
