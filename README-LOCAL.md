@@ -22,7 +22,7 @@ La même valeur doit être placée dans le paramètre `ApiKey` de l'EA.
 
 Pour connecter Deriv Bot sans saisir d'Account ID ni de jeton dans l'interface,
 créez une app OAuth2 Deriv, ajoutez exactement
-`http://localhost:5173/api/deriv/oauth/callback` comme Redirect URI, puis mettez
+`http://localhost:5173/deriv-oauth/callback` comme Redirect URI, puis mettez
 son client ID dans `DERIV_OAUTH_CLIENT_ID` dans `.env.local`.
 Si la page OAuth2 Deriv répond `Access Denied`, renseignez aussi
 `DERIV_LEGACY_APP_ID` avec l'ID d'une app Deriv API dont le Website URL pointe

@@ -21,7 +21,7 @@ export function getDerivLegacyAppId() {
 
 export function getDerivOAuthRedirectUri(requestUrl: string) {
   const url = new URL(requestUrl);
-  return `${url.origin}/api/deriv/oauth/callback`;
+  return `${url.origin}/deriv-oauth/callback`;
 }
 
 export function createPkcePair() {
