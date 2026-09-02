@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { DERIV_OAUTH_ACCOUNT_ID_COOKIE, DERIV_OAUTH_TOKEN_COOKIE, getDerivOAuthClientId } from "@/lib/deriv-oauth";
+import { DERIV_OAUTH_ACCOUNT_ID_COOKIE, DERIV_OAUTH_TOKEN_COOKIE, getDerivOAuthClientId, getDerivOAuthRedirectUri } from "@/lib/deriv-oauth";
 
 type ConnectPayload = {
   accountId?: unknown;
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
   return Response.json({ ok: true, url, accountId, accountType: requestedAccountType });
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const tokenConfigured = Boolean(process.env.DERIV_API?.trim());
   const appIdConfigured = Boolean(getDerivOAuthClientId());
   return Response.json({
@@ -81,5 +81,6 @@ export async function GET() {
     accountAutoDiscovery: appIdConfigured,
     oauthConfigured: appIdConfigured,
     oauthSessionActive: Boolean((await cookies()).get(DERIV_OAUTH_TOKEN_COOKIE)?.value),
+    oauthRedirectUri: getDerivOAuthRedirectUri(request.url),
   });
 }
