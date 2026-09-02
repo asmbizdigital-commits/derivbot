@@ -1,15 +1,18 @@
-DERIV AI TRADER EA — INSTALLATION
+DERIV AI TRADER EA v0.36 — INSTALLATION
 
 1. Ouvrez Deriv MetaTrader 5 sur un compte DÉMO.
 2. Dans MT5 : Fichier > Ouvrir le dossier des données.
 3. Placez DerivAITraderEA.mq5 dans MQL5/Experts.
 4. Ouvrez MetaEditor, compilez le fichier, puis redémarrez MT5.
-5. Dans Outils > Options > Expert Advisors, autorisez WebRequest pour :
-   https://deriv-ai-trader.javakikso.chatgpt.site
+5. Dans Outils > Options > Expert Advisors, autorisez WebRequest pour votre URL :
+   - local : http://192.168.1.66:5174
+   - hébergée : https://deriv-ai-trader.javakikso.chatgpt.site
 6. Attachez l'EA au graphique Volatility 25 Index ou Volatility 100 Index.
-7. Renseignez ApiKey. Laissez AllowAutoExecution=false pour le premier test.
-8. Activez Algo Trading, vérifiez les logs et les décisions NO_TRADE/BUY/SELL.
-9. Activez AllowAutoExecution uniquement après validation sur compte démo.
+7. Renseignez ApiBaseUrl et ApiKey avec les mêmes valeurs que le dashboard.
+8. Laissez AllowAutoExecution=false pour le premier test automatique.
+9. Gardez AllowDashboardCommands=true pour tester SELL 0.5 depuis le dashboard.
+10. Activez Algo Trading, vérifiez les logs et les décisions NO_TRADE/BUY/SELL.
+11. Activez AllowAutoExecution uniquement après validation sur compte démo.
 
 ATTENTION : MaxRiskUsd=10 représente 10% d'un capital de référence de 100 USD.
 Cette configuration est extrêmement agressive. L'EA refuse les symboles non prévus

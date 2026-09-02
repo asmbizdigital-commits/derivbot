@@ -1,11 +1,27 @@
-export const CONFIG = {
+export type TradingConfig = {
+  referenceCapitalUsd: number;
+  maxRiskUsd: number;
+  minScore: number;
+  allowedSymbols: readonly ["Volatility 25 Index", "Volatility 100 Index"];
+  maxOpenPositionsPerSymbol: number;
+  demoOnly: boolean;
+};
+
+export const CONFIG: TradingConfig = {
   referenceCapitalUsd: 100,
   maxRiskUsd: 10,
   minScore: 75,
   allowedSymbols: ["Volatility 25 Index", "Volatility 100 Index"] as const,
   maxOpenPositionsPerSymbol: 1,
-  demoOnly: true,
+  demoOnly: false,
 };
+
+export function updateTradingConfig(input: Partial<Pick<TradingConfig, "referenceCapitalUsd" | "maxRiskUsd" | "minScore">>) {
+  if (typeof input.referenceCapitalUsd === "number") CONFIG.referenceCapitalUsd = input.referenceCapitalUsd;
+  if (typeof input.maxRiskUsd === "number") CONFIG.maxRiskUsd = input.maxRiskUsd;
+  if (typeof input.minScore === "number") CONFIG.minScore = input.minScore;
+  return CONFIG;
+}
 
 export type AnalyzeRequest = {
   symbol: string;
@@ -38,8 +54,8 @@ export function analyzeSetup(input: AnalyzeRequest): TradingDecision {
   const reasons: string[] = [];
   const symbolAllowed = CONFIG.allowedSymbols.includes(input.symbol as typeof CONFIG.allowedSymbols[number]);
   if (!symbolAllowed) reasons.push("Symbole non autorisé");
-  if (CONFIG.demoOnly && input.accountType !== "demo") reasons.push("Le MVP autorise uniquement un compte démo");
-  if (input.proposedRiskUsd <= 0 || input.proposedRiskUsd > CONFIG.maxRiskUsd) reasons.push("Risque demandé supérieur à la limite de 10 USD");
+  if (CONFIG.demoOnly && input.accountType !== "demo") reasons.push("Le moteur autorise uniquement un compte démo");
+  if (input.proposedRiskUsd <= 0 || input.proposedRiskUsd > CONFIG.maxRiskUsd) reasons.push(`Risque demandé supérieur à la limite de ${CONFIG.maxRiskUsd} USD`);
   if (input.openPositions >= CONFIG.maxOpenPositionsPerSymbol) reasons.push("Une position est déjà ouverte sur cet indice");
 
   let score = 0;

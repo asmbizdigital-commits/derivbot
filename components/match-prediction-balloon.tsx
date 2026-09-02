@@ -1,0 +1,102 @@
+"use client";
+
+import { useMemo, useRef, useState } from "react";
+import { Clock3, GripHorizontal, Minus, Radio, Target, X } from "lucide-react";
+import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, type MatchStrategyRules } from "@/lib/match-prediction";
+
+type MatchPredictionBalloonProps = {
+  open: boolean;
+  connected: boolean;
+  marketName: string;
+  pipSize: number;
+  ticks: number[];
+  selectedDigit: number;
+  strategyRules?: MatchStrategyRules;
+  onClose: () => void;
+  onOpen: () => void;
+  onSelectDigit: (digit: number) => void;
+};
+
+type BalloonPosition = { x: number; y: number } | null;
+
+export function MatchPredictionBalloon({ open, connected, marketName, pipSize, ticks, selectedDigit, strategyRules = DEFAULT_MATCH_STRATEGY_RULES, onClose, onOpen, onSelectDigit }: MatchPredictionBalloonProps) {
+  const [minimized, setMinimized] = useState(false);
+  const [position, setPosition] = useState<BalloonPosition>(null);
+  const dragRef = useRef<{ pointerX: number; pointerY: number; left: number; top: number } | null>(null);
+  const liveTicks = useMemo(() => ticks.slice(-1000), [ticks]);
+  const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, null, strategyRules), [pipSize, liveTicks, strategyRules]);
+  const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability), [prediction.candidates]);
+  const candidate = prediction.bestCandidate ?? rankedCandidates[0] ?? null;
+  const predictionStatus = prediction.bestCandidate
+    ? `Signal qualifié · accord ${prediction.bestCandidate.agreementScore}/5`
+    : candidate
+      ? `Scan proba avancé · accord ${candidate.agreementScore}/5`
+    : `${prediction.sampleSize}/200 ticks collectés`;
+  const maximumProbability = Math.max(0.1, ...rankedCandidates.map((item) => item.probability));
+  const style = position ? { left: position.x, top: position.y, right: "auto" } : undefined;
+
+  function startDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!rect) return;
+    dragRef.current = { pointerX: event.clientX, pointerY: event.clientY, left: rect.left, top: rect.top };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function drag(event: React.PointerEvent<HTMLDivElement>) {
+    const origin = dragRef.current;
+    if (!origin) return;
+    const width = event.currentTarget.parentElement?.offsetWidth ?? 410;
+    const height = event.currentTarget.parentElement?.offsetHeight ?? 400;
+    const x = Math.min(Math.max(8, origin.left + event.clientX - origin.pointerX), window.innerWidth - width - 8);
+    const y = Math.min(Math.max(8, origin.top + event.clientY - origin.pointerY), window.innerHeight - height - 8);
+    setPosition({ x, y });
+  }
+
+  function stopDrag(event: React.PointerEvent<HTMLDivElement>) {
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  if (!open) {
+    return <button className="digit-balloon-launcher match-balloon-launcher" onClick={() => { setMinimized(false); onOpen(); }} aria-label="Ouvrir la prédiction Matches"><Target/><span>Prédiction Matches</span></button>;
+  }
+
+  return <aside className={`digit-balloon match-balloon ${minimized ? "is-minimized" : ""}`} style={style} role="dialog" aria-modal="false" aria-labelledby="match-balloon-title">
+    <div className="digit-balloon-handle" onPointerDown={startDrag} onPointerMove={drag} onPointerUp={stopDrag} onPointerCancel={stopDrag}>
+      <GripHorizontal aria-hidden="true"/>
+      <div><span className={connected ? "is-live" : ""}/><b id="match-balloon-title">Prédiction Matches</b></div>
+      <button onPointerDown={(event) => event.stopPropagation()} onClick={() => setMinimized((value) => !value)} aria-label={minimized ? "Agrandir le ballon Matches" : "Réduire le ballon Matches"}><Minus/></button>
+      <button onPointerDown={(event) => event.stopPropagation()} onClick={onClose} aria-label="Fermer le ballon Matches"><X/></button>
+    </div>
+
+    {!minimized && <div className="digit-balloon-content match-balloon-content">
+      <div className="digit-balloon-market">
+        <span><small>MARCHÉ</small><b>{marketName}</b></span>
+        <span className={connected ? "live" : "offline"}><Radio/>{connected ? "LIVE" : "HORS LIGNE"}</span>
+      </div>
+
+      <div className="match-prediction-hero" aria-live="polite">
+        <span><small>DIGIT ESTIMÉ</small><strong>{candidate?.digit ?? "-"}</strong></span>
+        <div><small>PROBABILITÉ MODÉLISÉE</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
+      </div>
+
+      <div className="match-refresh-status"><Clock3/><span>Estimation en direct</span><b>LIVE</b></div>
+
+      {candidate && <div className="match-model-grid">
+        <span><small>COURT 50</small><b>{(candidate.shortProbability * 100).toFixed(1)}%</b></span>
+        <span><small>MOYEN 160</small><b>{(candidate.mediumProbability * 100).toFixed(1)}%</b></span>
+        <span><small>LONG 500</small><b>{(candidate.longProbability * 100).toFixed(1)}%</b></span>
+        <span><small>TRANSITION</small><b>{(candidate.transitionProbability * 100).toFixed(1)}%</b></span>
+      </div>}
+
+      <div className="match-candidate-grid" role="group" aria-label="Classement probabiliste Matches">
+        {rankedCandidates.map((item) => <button key={item.digit} className={`${candidate?.digit === item.digit ? "predicted" : ""} ${selectedDigit === item.digit ? "selected" : ""}`} onClick={() => onSelectDigit(item.digit)} aria-label={`Digit ${item.digit}, probabilité modélisée ${(item.probability * 100).toFixed(1)} pour cent`}>
+          <b>{item.digit}</b><span>{(item.probability * 100).toFixed(1)}%</span><i style={{ height: `${Math.max(4, (item.probability / maximumProbability) * 100)}%` }}/>
+        </button>)}
+      </div>
+
+      <p className="digit-balloon-note">Estimation bayésienne recalculée à chaque nouveau tick. Le flux Deriv utilise un RNG sécurisé: ce résultat ne garantit pas le prochain digit.</p>
+    </div>}
+  </aside>;
+}

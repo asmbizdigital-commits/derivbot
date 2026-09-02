@@ -1,4 +1,5 @@
 import { analyzeSetup, isAnalyzeRequest } from "@/lib/trading-engine";
+import { markMt5Analysis, markMt5Seen } from "@/lib/mt5-connection";
 
 export async function POST(request: Request) {
   const apiKey = request.headers.get("x-ea-api-key");
@@ -10,6 +11,8 @@ export async function POST(request: Request) {
   catch { return Response.json({ error: "Corps JSON invalide" }, { status: 400 }); }
   if (!isAnalyzeRequest(payload)) return Response.json({ error: "Données de marché incomplètes" }, { status: 422 });
 
+  markMt5Seen();
   const decision = analyzeSetup(payload);
-  return Response.json({ decision, generatedAt: new Date().toISOString(), executionMode: "demo" });
+  markMt5Analysis({ request: payload, decision, generatedAt: new Date().toISOString() });
+  return Response.json({ decision, generatedAt: new Date().toISOString(), executionMode: payload.accountType });
 }
