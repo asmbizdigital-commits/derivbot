@@ -1,0 +1,22 @@
+services:
+  - type: web
+    runtime: node
+    name: derivbot
+    repo: https://github.com/asmbizdigital-commits/derivbot
+    branch: main
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: DERIV_APP_ID
+        sync: false
+      - key: DERIV_OAUTH_CLIENT_ID
+        sync: false
+      - key: DERIV_OAUTH_REDIRECT_URI
+        sync: false
+      - key: DERIV_API
+        sync: false
+      - key: DERIV_OPTIONS_ACCOUNT_ID
+        sync: false
