@@ -20,7 +20,7 @@ export type MatchPrediction = {
   bestCandidate: MatchCandidate | null;
 };
 
-export type MatchSelectionMode = "advanced_probability" | "most_appearing_1000" | "frequency_window";
+export type MatchSelectionMode = "advanced_probability" | "most_appearing_1000" | "frequency_window" | "top_two_frequency";
 
 export type MatchStrategyRules = {
   selectionMode: MatchSelectionMode;
@@ -83,12 +83,12 @@ function conditionalDistribution(digits: number[], context: number[]) {
   };
 }
 
-export function buildMatchPrediction(ticks: number[], pipSize: number, preferredDigit: number | null = null, rules: MatchStrategyRules = DEFAULT_MATCH_STRATEGY_RULES): MatchPrediction {
+export function buildMatchPrediction(ticks: number[], pipSize: number, preferredDigit: number | null = null, rules: MatchStrategyRules = DEFAULT_MATCH_STRATEGY_RULES, completedContracts = 0): MatchPrediction {
   const prices = ticks.slice(-1000);
   const digits = prices.map((price) => Number(price.toFixed(pipSize).at(-1)));
   if (!digits.length) return { ready: false, sampleSize: 0, candidates: [], bestCandidate: null };
 
-  if (rules.selectionMode === "frequency_window") {
+  if (rules.selectionMode === "frequency_window" || rules.selectionMode === "top_two_frequency") {
     const windowSize = Math.max(1, Math.min(1000, Math.trunc(rules.windowSize)));
     const sample = digits.slice(-windowSize);
     const counts = Array.from({ length: 10 }, () => 0);
@@ -98,11 +98,12 @@ export function buildMatchPrediction(ticks: number[], pipSize: number, preferred
       .sort((left, right) => right.count - left.count || left.digit - right.digit);
     const top = ranked[0];
     const runnerUp = ranked[1] ?? { digit: top.digit, count: 0, probability: 0 };
-    const targetDigit = preferredDigit === null ? top.digit : preferredDigit;
+    const alternatingRank = rules.selectionMode === "top_two_frequency" ? Math.max(0, Math.trunc(completedContracts)) % 2 : 0;
+    const targetDigit = preferredDigit ?? ranked[alternatingRank].digit;
     const candidates = counts.map((count, digit) => {
       const probability = sample.length ? count / sample.length : 0;
       const dominanceGap = digit === top.digit ? probability - runnerUp.probability : probability - top.probability;
-      const selectedDigit = digit === targetDigit && (preferredDigit !== null || digit === top.digit);
+      const selectedDigit = digit === targetDigit;
       const stable = sample.length >= rules.minimumTicks
         && selectedDigit
         && probability >= rules.minimumProbability;
