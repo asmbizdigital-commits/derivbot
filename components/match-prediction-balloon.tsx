@@ -27,7 +27,10 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
   const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, null, strategyRules), [pipSize, liveTicks, strategyRules]);
   const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability), [prediction.candidates]);
   const candidate = prediction.bestCandidate ?? rankedCandidates[0] ?? null;
-  const predictionStatus = prediction.bestCandidate
+  const adaptive = strategyRules.selectionMode === "top_two_adaptive";
+  const predictionStatus = adaptive
+    ? prediction.ready ? `Choix top 2 · ${prediction.validationSamples ?? 0} prévisions passées comparées` : `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés`
+    : prediction.bestCandidate
     ? `Signal qualifié · accord ${prediction.bestCandidate.agreementScore}/5`
     : candidate
       ? `Scan proba avancé · accord ${candidate.agreementScore}/5`
@@ -78,15 +81,15 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
 
       <div className="match-prediction-hero" aria-live="polite">
         <span><small>DIGIT ESTIMÉ</small><strong>{candidate?.digit ?? "-"}</strong></span>
-        <div><small>PROBABILITÉ MODÉLISÉE</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
+        <div><small>{adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
 
       <div className="match-refresh-status"><Clock3/><span>Estimation en direct</span><b>LIVE</b></div>
 
       {candidate && <div className="match-model-grid">
-        <span><small>COURT 50</small><b>{(candidate.shortProbability * 100).toFixed(1)}%</b></span>
-        <span><small>MOYEN 160</small><b>{(candidate.mediumProbability * 100).toFixed(1)}%</b></span>
-        <span><small>LONG 500</small><b>{(candidate.longProbability * 100).toFixed(1)}%</b></span>
+        <span><small>{adaptive ? "RÉCENT 20" : "COURT 50"}</small><b>{(candidate.shortProbability * 100).toFixed(1)}%</b></span>
+        <span><small>{adaptive ? `LISSÉ ${strategyRules.windowSize}` : "MOYEN 160"}</small><b>{(candidate.mediumProbability * 100).toFixed(1)}%</b></span>
+        <span><small>{adaptive ? "FRÉQUENCE OBSERVÉE" : "LONG 500"}</small><b>{((adaptive ? candidate.observedFrequency ?? 0 : candidate.longProbability) * 100).toFixed(1)}%</b></span>
         <span><small>TRANSITION</small><b>{(candidate.transitionProbability * 100).toFixed(1)}%</b></span>
       </div>}
 
@@ -96,7 +99,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
         </button>)}
       </div>
 
-      <p className="digit-balloon-note">Estimation bayésienne recalculée à chaque nouveau tick. Le flux Deriv utilise un RNG sécurisé: ce résultat ne garantit pas le prochain digit.</p>
+      <p className="digit-balloon-note">Estimation recalculée à chaque nouveau tick. Le flux Deriv utilise un RNG sécurisé: ce résultat ne garantit pas le prochain digit.</p>
     </div>}
   </aside>;
 }

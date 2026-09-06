@@ -11,6 +11,7 @@ export type MatchCandidate = {
   agreementScore: number;
   dominanceGap: number;
   stable: boolean;
+  observedFrequency?: number;
 };
 
 export type MatchPrediction = {
@@ -18,9 +19,14 @@ export type MatchPrediction = {
   sampleSize: number;
   candidates: MatchCandidate[];
   bestCandidate: MatchCandidate | null;
+  validationSamples?: number;
 };
 
-export type MatchSelectionMode = "advanced_probability" | "most_appearing_1000" | "frequency_window" | "top_two_frequency";
+export type MatchSelectionMode = "advanced_probability" | "most_appearing_1000" | "frequency_window" | "top_two_frequency" | "top_two_adaptive";
+
+export function isFastMatchMode(mode: MatchSelectionMode) {
+  return mode === "top_two_frequency" || mode === "top_two_adaptive";
+}
 
 export type MatchStrategyRules = {
   selectionMode: MatchSelectionMode;
@@ -83,10 +89,67 @@ function conditionalDistribution(digits: number[], context: number[]) {
   };
 }
 
+// These are estimates, not calibrated win probabilities. Always retain a
+// uniform component so small historical clusters do not become certainty.
+function adaptiveDistributions(digits: number[], windowSize: number) {
+  const uniform = Array.from({ length: 10 }, () => BASE_PROBABILITY);
+  const frequency = distribution(digits, windowSize, 50);
+  const recent = distribution(digits, Math.min(20, windowSize), 50);
+  const transition = conditionalDistribution(digits, [digits.at(-1)!]);
+  return { models: [uniform, frequency, recent, transition.total >= 20 ? transition.probabilities : uniform], transition };
+}
+
+function buildAdaptiveMatchPrediction(digits: number[], preferredDigit: number | null, rules: MatchStrategyRules): MatchPrediction {
+  const windowSize = Math.max(1, Math.min(1000, Math.trunc(rules.windowSize)));
+  const counts = Array.from({ length: 10 }, () => 0);
+  const sample = digits.slice(-windowSize);
+  sample.forEach((digit) => counts[digit] += 1);
+  const ranked = counts.map((count, digit) => ({ count, digit })).sort((a, b) => b.count - a.count || a.digit - b.digit);
+
+  // Replay only past forecasts: history ends BEFORE each scored result.
+  // Rolling expert weights are a ranking aid, not an out-of-sample edge claim.
+  const logWeights = [Math.log(4), 0, 0, 0];
+  const firstOutcome = Math.max(windowSize, digits.length - 100);
+  const validationSamples = Math.max(0, digits.length - firstOutcome);
+  for (let index = firstOutcome; index < digits.length; index += 1) {
+    const { models } = adaptiveDistributions(digits.slice(Math.max(0, index - 500), index), windowSize);
+    models.forEach((model, expert) => { logWeights[expert] += Math.log(model[digits[index]]); });
+  }
+  const maximumLogWeight = Math.max(...logWeights);
+  const weights = logWeights.map((value) => Math.exp(value - maximumLogWeight));
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+  const { models, transition } = adaptiveDistributions(digits.slice(-500), windowSize);
+  const scores = counts.map((_, digit) => 0.5 * BASE_PROBABILITY + 0.5 * models.reduce((sum, model, expert) => sum + model[digit] * weights[expert] / weightTotal, 0));
+  const topTwo = ranked.slice(0, 2).sort((a, b) => scores[b.digit] - scores[a.digit] || b.count - a.count || a.digit - b.digit);
+  const targetDigit = preferredDigit ?? topTwo[0].digit;
+  const ready = sample.length >= rules.minimumTicks;
+  const candidates = counts.map((count, digit): MatchCandidate => ({
+    digit,
+    probability: scores[digit],
+    observedFrequency: count / sample.length,
+    longProbability: models[1][digit],
+    mediumProbability: models[1][digit],
+    shortProbability: models[2][digit],
+    transitionProbability: models[3][digit],
+    contextProbability: BASE_PROBABILITY,
+    transitionSamples: transition.total,
+    contextSamples: 0,
+    agreementScore: models.slice(1).filter((model) => model[digit] > BASE_PROBABILITY).length,
+    dominanceGap: scores[digit] - Math.max(...scores.filter((_, index) => index !== digit)),
+    stable: ready && digit === targetDigit && scores[digit] >= rules.minimumProbability,
+  }));
+  return { ready, sampleSize: sample.length, candidates, bestCandidate: candidates.find((candidate) => candidate.stable) ?? null, validationSamples };
+}
+
 export function buildMatchPrediction(ticks: number[], pipSize: number, preferredDigit: number | null = null, rules: MatchStrategyRules = DEFAULT_MATCH_STRATEGY_RULES, completedContracts = 0): MatchPrediction {
   const prices = ticks.slice(-1000);
+  if (!Number.isInteger(pipSize) || pipSize < 0 || pipSize > 20 || prices.some((price) => !Number.isFinite(price) || Math.abs(price) >= 1e21)) {
+    return { ready: false, sampleSize: 0, candidates: [], bestCandidate: null };
+  }
   const digits = prices.map((price) => Number(price.toFixed(pipSize).at(-1)));
   if (!digits.length) return { ready: false, sampleSize: 0, candidates: [], bestCandidate: null };
+
+  if (rules.selectionMode === "top_two_adaptive") return buildAdaptiveMatchPrediction(digits, preferredDigit, rules);
 
   if (rules.selectionMode === "frequency_window" || rules.selectionMode === "top_two_frequency") {
     const windowSize = Math.max(1, Math.min(1000, Math.trunc(rules.windowSize)));
