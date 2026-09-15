@@ -8,6 +8,8 @@ import { DigitPredictionBalloon } from "@/components/digit-prediction-balloon";
 import { MatchPredictionBalloon } from "@/components/match-prediction-balloon";
 import { evaluateOverUnderQuote, getUnderEightTransitionState, type OverUnderCandidate } from "@/lib/over-under-prediction";
 import { buildRiseFallSignal, evaluateRiseFallQuote, type RiseFallSignal } from "@/lib/rise-fall-prediction";
+import { OverUnderPairPanel } from "@/components/over-under-pair-panel";
+import { OverUnderPairScanner, type PairRow } from "@/lib/over-under-pair";
 import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, evaluateMatchQuote, isFastMatchMode, type MatchCandidate, type MatchStrategyRules } from "@/lib/match-prediction";
 import { DERIV_MARKETS, DERIV_MARKET_PIP_SIZES, isDerivMarketSymbol, type DerivMarketSymbol } from "@/lib/deriv-markets";
 
@@ -108,6 +110,7 @@ type DerivProposal = {
 };
 
 type DerivPendingBuy = {
+  pair?: boolean;
   contractType: DerivContractCode;
   barrier: DerivBarrier;
   stake: number;
@@ -181,7 +184,7 @@ type DerivMode = "manual" | "auto";
 type DerivStrategy = "trend" | "momentum" | "reversal";
 type DerivHistoryPeriod = "today" | "7d" | "30d" | "all";
 type DerivAutoDigitBarrierMode = "dynamic" | "fixed";
-type DerivOverUnderStrategy = "under8_transition" | "over2" | "over5" | "under5";
+type DerivOverUnderStrategy = "under8_transition" | "over2" | "over5" | "under5" | "over5_under4_all";
 type EaStrategyPreset = "smc_ai" | "trend_breakout" | "scalping" | "conservative";
 type EaTimeframe = "M5" | "M15" | "H1";
 type CopyTradingProvider = "mt5_master" | "deriv_signal" | "manual_leader";
@@ -243,6 +246,7 @@ const derivStrategies: Record<DerivStrategy, { name: string; description: string
 };
 
 const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; description: string; contractType: "DIGITOVER" | "DIGITUNDER"; barrier: number }> = {
+  over5_under4_all: { name: "Over 5 + Under 4", description: "Analyse les fréquences sur tous les indices de volatilité disponibles ; une paire sur le meilleur indice qualifié.", contractType: "DIGITOVER", barrier: 5 },
   under8_transition: { name: "Under 8", description: "Attend un digit 9, puis entre Under 8 dès que le flux passe à un autre digit.", contractType: "DIGITUNDER", barrier: 8 },
   over2: { name: "Over 2", description: "Entre Over 2 quand les derniers chiffres favorisent 3 à 9.", contractType: "DIGITOVER", barrier: 2 },
   over5: { name: "Over 5", description: "Attend un digit 4, puis entre Over 5 dès que le flux passe à un autre digit.", contractType: "DIGITOVER", barrier: 5 },
@@ -250,6 +254,7 @@ const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; d
 };
 
 function getOverUnderStrategySummary(strategy: DerivOverUnderStrategy) {
+  if (strategy === "over5_under4_all") return "Paire simultanée · scan toutes volatilités";
   const config = derivOverUnderStrategies[strategy];
   if (strategy === "under8_transition") return "Déclenche après 9 -> autre digit";
   if (strategy === "over5") return "Déclenche après 4 -> autre digit";
@@ -550,7 +555,7 @@ function getDigitExitTransitionState(ticks: number[], triggerDigit: number, pipS
   };
 }
 
-function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOverUnderStrategy, "under8_transition" | "over5">, pipSize = 3): DerivDigitAutoSignal | null {
+function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOverUnderStrategy, "under8_transition" | "over5" | "over5_under4_all">, pipSize = 3): DerivDigitAutoSignal | null {
   if (ticks.length < 50) return null;
   const strategyConfig = derivOverUnderStrategies[strategy];
   const shortStats = getDigitStats(ticks, 25, pipSize);
@@ -573,6 +578,7 @@ function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOve
 
 function getDerivDigitAutoSignal(ticks: number[], contractType: DerivContractCode, preferredBarrier: number | null = null, pipSize = 3, overUnderStrategy: DerivOverUnderStrategy = "under8_transition", excludedMatchDigits: Set<number> = new Set(), matchRules: MatchStrategyRules = DEFAULT_MATCH_STRATEGY_RULES, completedMatchContracts = 0): DerivDigitAutoSignal | null {
   if (contractType === "DIGITOVER" || contractType === "DIGITUNDER") {
+    if (overUnderStrategy === "over5_under4_all") return null;
     if (overUnderStrategy === "over5") {
       const transition = getDigitExitTransitionState(ticks, 4, pipSize);
       if (transition.state !== "triggered") return null;
@@ -840,6 +846,12 @@ export default function Home() {
 		  const derivTouchBarrierRef = useRef("+1");
 		  const derivAutoDigitBarrierModeRef = useRef<DerivAutoDigitBarrierMode>("dynamic");
 		  const derivAutoQuoteRef = useRef<Map<number, DerivAutoQuote>>(new Map());
+  const derivPairScannerRef = useRef<OverUnderPairScanner | null>(null);
+  const derivPairStopLossRef = useRef(4);
+  const [derivPairStopLoss, setDerivPairStopLoss] = useState(4);
+  const [derivPairRows, setDerivPairRows] = useState<PairRow[]>([]);
+  const derivPairUiUpdateRef = useRef(0);
+  const derivPortfolioReadyRef = useRef(false);
   const derivOverUnderQuoteScanRef = useRef<DerivOverUnderQuoteScan | null>(null);
   const derivLastOverUnderScanSerialRef = useRef(-20);
   const derivHistoryReqIdRef = useRef<number | null>(null);
@@ -1034,20 +1046,22 @@ export default function Home() {
   }
 
   function stopDerivAutoOnSignalLimit() {
+    derivPairScannerRef.current?.stop();
     derivAutoRunningRef.current = false;
     derivAutoQuoteRef.current.clear();
     derivOverUnderQuoteScanRef.current = null;
-    derivPendingBuysRef.current.clear();
+    clearPendingNormalBuys();
     setDerivAutoRunning(false);
     setDerivAutoStatus(`Session stoppée · limite ${derivMaxSignalsRef.current} signal${derivMaxSignalsRef.current > 1 ? "s" : ""} atteinte`);
     setDerivMessage("Limite de signaux atteinte · aucun nouvel achat ne sera envoyé");
   }
 
   function stopDerivAutoOnPnlLimit(reason: string) {
+    derivPairScannerRef.current?.stop();
     derivAutoRunningRef.current = false;
     derivAutoQuoteRef.current.clear();
     derivOverUnderQuoteScanRef.current = null;
-    derivPendingBuysRef.current.clear();
+    clearPendingNormalBuys();
     setDerivAutoRunning(false);
     setDerivAutoStatus(reason);
     setDerivMessage(`${reason} · aucun nouvel achat ne sera envoyé`);
@@ -1063,13 +1077,19 @@ export default function Home() {
   }
 
   function connectDerivSocket(url: string, mode: "public" | AccountMode) {
+    derivPairScannerRef.current?.dispose();
+    derivPairScannerRef.current = null;
+    derivPortfolioReadyRef.current = false;
+    derivPendingBuysRef.current.clear();
+    derivAutoRunningRef.current = false;
+    setDerivAutoRunning(false);
     const previous = derivSocketRef.current;
     derivSocketRef.current = null;
     previous?.close();
     derivStatusRef.current = "connecting";
     derivAutoQuoteRef.current.clear();
     derivOverUnderQuoteScanRef.current = null;
-    derivPendingBuysRef.current.clear();
+    clearPendingNormalBuys();
     if (mode === "public") {
       derivAutoRunningRef.current = false;
       setDerivAutoRunning(false);
@@ -1094,12 +1114,15 @@ export default function Home() {
       }
     };
     socket.onmessage = (event) => {
+      if (derivSocketRef.current !== socket) return;
       let message: Record<string, unknown>;
       try {
         message = JSON.parse(String(event.data)) as Record<string, unknown>;
       } catch {
         return;
       }
+
+      if (derivPairScannerRef.current?.handle(message)) return;
 
       const error = message.error as { message?: string } | undefined;
       if (error) {
@@ -1120,7 +1143,14 @@ export default function Home() {
         } else {
           derivAutoQuoteRef.current.clear();
           derivOverUnderQuoteScanRef.current = null;
-          derivPendingBuysRef.current.clear();
+          clearPendingNormalBuys();
+        }
+        if (failedBuy?.pair) {
+          derivAutoRunningRef.current = false;
+          setDerivAutoRunning(false);
+          derivPairScannerRef.current?.stop();
+          setDerivAutoStatus(`Paire incomplète · ${error.message ?? "achat refusé"} · aucun rachat automatique`);
+          return;
         }
         if (failedQuote?.overUnderScan && reqId !== null) {
           derivOverUnderQuoteScanRef.current?.pendingReqIds.delete(reqId);
@@ -1239,6 +1269,7 @@ export default function Home() {
 
       const buy = message.buy as { contract_id?: number; buy_price?: number; payout?: number } | undefined;
       if (typeof buy?.contract_id === "number") {
+        if (derivOpenContractsRef.current.has(buy.contract_id) || derivSettledContractIdsRef.current.has(buy.contract_id)) return;
         const reqId = toNumber(message.req_id);
         const pending = reqId !== null ? derivPendingBuysRef.current.get(reqId) ?? derivPendingBuyRef.current : derivPendingBuyRef.current;
         if (reqId !== null) derivPendingBuysRef.current.delete(reqId);
@@ -1257,13 +1288,14 @@ export default function Home() {
         setDerivMessage(`Contrat #${buy.contract_id} en cours · 0/${pending.duration} ticks`);
         if (derivAutoRunningRef.current) setDerivAutoStatus(`Contrat #${buy.contract_id} en cours${pending.batchTotal ? ` · position ${pending.batchIndex}/${pending.batchTotal}` : ""}`);
         socket.send(JSON.stringify({ proposal_open_contract: 1, contract_id: buy.contract_id, subscribe: 1 }));
-        if (derivAutoRunningRef.current && pending.batchTotal && pending.batchIndex && pending.batchIndex < pending.batchTotal) {
+        if (!pending.pair && derivAutoRunningRef.current && pending.batchTotal && pending.batchIndex && pending.batchIndex < pending.batchTotal) {
           requestDerivAutoPosition(socket, { ...pending, batchIndex: pending.batchIndex + 1, batchTotal: pending.batchTotal });
         }
       }
 
       const portfolio = message.portfolio as { contracts?: Array<{ contract_id?: number; buy_price?: string | number; payout?: string | number; contract_type?: string; barrier?: string | number; symbol?: string; date_start?: number }> } | undefined;
       if (Array.isArray(portfolio?.contracts)) {
+        derivPortfolioReadyRef.current = true;
         const openContracts = portfolio.contracts.filter((contract) => typeof contract.contract_id === "number");
         derivOpenContractsRef.current = new Set(openContracts.map((contract) => contract.contract_id!));
         derivOpenContractRef.current = derivOpenContractsRef.current.size > 0;
@@ -1410,6 +1442,7 @@ export default function Home() {
     };
     socket.onerror = () => {
       if (derivSocketRef.current !== socket) return;
+      derivPairScannerRef.current?.dispose();
       derivStatusRef.current = "error";
       derivAutoRunningRef.current = false;
       setDerivAutoRunning(false);
@@ -1419,6 +1452,7 @@ export default function Home() {
     };
     socket.onclose = () => {
       if (derivSocketRef.current !== socket) return;
+      derivPairScannerRef.current?.dispose();
       derivStatusRef.current = "error";
       derivAutoRunningRef.current = false;
       setDerivAutoRunning(false);
@@ -1480,6 +1514,7 @@ export default function Home() {
     }
 
     return () => {
+      derivPairScannerRef.current?.dispose();
       derivSocketRef.current?.close();
       derivSocketRef.current = null;
     };
@@ -1490,6 +1525,68 @@ export default function Home() {
     requestDerivProfitHistory();
   }, [activeView, derivHistoryPeriod, derivStatus]);
 
+  function clearPendingNormalBuys() {
+    for (const [id, pending] of derivPendingBuysRef.current) {
+      if (!pending.pair) derivPendingBuysRef.current.delete(id);
+    }
+  }
+
+  function startDerivPair(socket: WebSocket) {
+    if (!derivPortfolioReadyRef.current || derivOpenContractsRef.current.size || derivPendingBuysRef.current.size || derivPairScannerRef.current?.busy) {
+      setDerivAutoStatus("Attendez la réconciliation du portefeuille et la clôture des contrats en cours.");
+      return;
+    }
+    const stake = derivStakeRef.current;
+    const stopLoss = derivPairStopLossRef.current;
+    if (!Number.isFinite(stake) || stake < 0.35 || !Number.isFinite(stopLoss) || stopLoss < 2 * stake || derivBalanceRef.current === null || derivBalanceRef.current < 2 * stake) {
+      setDerivAutoStatus("La mise totale de la paire doit tenir dans la balance et le budget de perte de session.");
+      return;
+    }
+    derivPairScannerRef.current?.dispose();
+    resetDerivSessionStats();
+    derivModeRef.current = "auto";
+    derivAutoRunningRef.current = true;
+    setDerivMode("auto");
+    setDerivAutoRunning(true);
+    setDerivPairRows([]);
+    const scanner = new OverUnderPairScanner({
+      nextId: () => ++derivReqIdRef.current,
+      send: (message) => {
+        if (derivSocketRef.current !== socket || socket.readyState !== WebSocket.OPEN) throw new Error("Socket closed");
+        socket.send(JSON.stringify(message));
+      },
+      onStatus: setDerivAutoStatus,
+      onHalt: (message) => {
+        derivAutoRunningRef.current = false;
+        setDerivAutoRunning(false);
+        setDerivAutoStatus(message);
+        setDerivMessage(message);
+      },
+      onUpdate: () => {
+        if (Date.now() - derivPairUiUpdateRef.current > 250) {
+          derivPairUiUpdateRef.current = Date.now();
+          setDerivPairRows(scanner.rows());
+        }
+        maybeRunDerivAuto(derivTicksRef.current, socket);
+      },
+      canBuy: (cost) => {
+        if (!derivAutoRunningRef.current || derivModeRef.current !== "auto" || derivOverUnderStrategyRef.current !== "over5_under4_all"
+          || !isDerivTradingStatus(derivStatusRef.current) || !derivPortfolioReadyRef.current || derivSocketRef.current !== socket
+          || derivOpenContractsRef.current.size > 0 || derivPendingBuysRef.current.size > 0) return false;
+        if (derivMaxSignalsRef.current > 0 && derivSessionSignalsRef.current >= derivMaxSignalsRef.current) { stopDerivAutoOnSignalLimit(); return false; }
+        if (derivBalanceRef.current === null || derivBalanceRef.current < cost) { stopDerivAutoOnPnlLimit("Balance insuffisante pour les deux contrats"); return false; }
+        if (derivSessionPnlRef.current - cost < -derivPairStopLossRef.current - 1e-8) { stopDerivAutoOnPnlLimit("Budget de perte insuffisant pour engager une nouvelle paire"); return false; }
+        return true;
+      },
+      onBuyRequest: (id, leg) => { derivPendingBuysRef.current.set(id, leg); },
+      onSignal: registerDerivSessionSignal,
+    });
+    derivPairScannerRef.current = scanner;
+    setDerivAutoStatus("Découverte de tous les indices de volatilité disponibles…");
+    setDerivMessage("Over 5 + Under 4 · 2 mises fixes par paire · martingale et multiplicateurs ignorés pour cette stratégie");
+    scanner.start();
+  }
+
   function maybeRunDerivAuto(currentTicks: number[], socket: WebSocket) {
     if (derivModeRef.current !== "auto" || !derivAutoRunningRef.current || !isDerivTradingStatus(derivStatusRef.current)) return;
     if (derivOpenContractsRef.current.size > 0 || derivAutoQuoteRef.current.size > 0 || derivPendingBuysRef.current.size > 0 || derivOverUnderQuoteScanRef.current) return;
@@ -1499,6 +1596,10 @@ export default function Home() {
     }
     const currentContractType = derivContractTypeRef.current;
     const currentMatchStrategy = derivMatchStrategyRef.current;
+    if ((currentContractType === "DIGITOVER" || currentContractType === "DIGITUNDER") && derivOverUnderStrategyRef.current === "over5_under4_all") {
+      derivPairScannerRef.current?.requestBestPair(derivStakeRef.current, derivCurrencyRef.current);
+      return;
+    }
     if (currentContractType === "DIGITMATCH") {
       if (currentMatchStrategy.takeProfit !== null && derivSessionPnlRef.current >= currentMatchStrategy.takeProfit) {
         stopDerivAutoOnPnlLimit(`Take Profit atteint · +${formatUsd(derivSessionPnlRef.current)}`);
@@ -1724,6 +1825,8 @@ export default function Home() {
   }
 
   function changeDerivOverUnderStrategy(nextStrategy: DerivOverUnderStrategy) {
+    stopDerivAuto();
+    if (nextStrategy === "over5_under4_all") { derivModeRef.current = "auto"; setDerivMode("auto"); }
     const strategy = derivOverUnderStrategies[nextStrategy];
     derivOverUnderStrategyRef.current = nextStrategy;
     derivContractTypeRef.current = strategy.contractType;
@@ -1811,11 +1914,12 @@ export default function Home() {
   }
 
   function changeDerivMode(nextMode: DerivMode) {
+    derivPairScannerRef.current?.stop();
     derivModeRef.current = nextMode;
     derivAutoRunningRef.current = false;
     derivAutoQuoteRef.current.clear();
     derivOverUnderQuoteScanRef.current = null;
-    derivPendingBuysRef.current.clear();
+    clearPendingNormalBuys();
     setDerivMode(nextMode);
     setDerivAutoRunning(false);
     setDerivAutoStatus(nextMode === "auto" ? "Prêt · appuyez sur Play" : "Bot arrêté");
@@ -1827,6 +1931,10 @@ export default function Home() {
     if (!isDerivTradingStatus(derivStatusRef.current) || !socket || socket.readyState !== WebSocket.OPEN) {
       setDerivAutoStatus("Connectez d’abord le compte Deriv Options");
       setDerivMessage("Le mode automatique exige un compte Options connecté");
+      return;
+    }
+    if (derivOverUnderStrategyRef.current === "over5_under4_all" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) {
+      startDerivPair(socket);
       return;
     }
     const isAdvancedOverUnder = derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER";
@@ -1870,10 +1978,11 @@ export default function Home() {
   }
 
   function stopDerivAuto() {
+    derivPairScannerRef.current?.stop();
     derivAutoRunningRef.current = false;
     derivAutoQuoteRef.current.clear();
     derivOverUnderQuoteScanRef.current = null;
-    derivPendingBuysRef.current.clear();
+    clearPendingNormalBuys();
     setDerivAutoRunning(false);
     setDerivAutoStatus(derivOpenContractRef.current ? "Arrêté · le contrat engagé reste suivi" : "Bot arrêté");
     setDerivMessage("Mode automatique arrêté · aucun nouvel achat ne sera envoyé");
@@ -1949,6 +2058,7 @@ export default function Home() {
   }
 
   function requestDerivProposal() {
+    if (derivOverUnderStrategyRef.current === "over5_under4_all" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) { setDerivMessage("La paire Over 5 + Under 4 se lance en Full automatique avec Play."); return; }
     const socket = derivSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setDerivMessage("Connectez d’abord le flux Deriv");
@@ -2114,6 +2224,7 @@ export default function Home() {
 	      const selectedContractCategory = derivContractCategories[derivContractCategory];
 	      const selectedContractBarrierOptions = getDigitBarrierOptions(derivContractType);
 	      const derivMartingalePercent = Math.round((derivMartingaleMultiplier - 1) * 100);
+	      const isPairedOverUnder = derivOverUnderStrategy === "over5_under4_all" && (derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER");
 	      const isOverUnderCategory = derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER";
 	      const martingaleCycleLabel = derivConsecutiveLosses > derivOverUnderMartingaleCycles ? "Cycle terminé" : `${Math.max(0, derivConsecutiveLosses)}/${derivOverUnderMartingaleCycles}`;
 	      return <section className="view-stack">
@@ -2167,6 +2278,7 @@ export default function Home() {
 	                {(Object.entries(derivOverUnderStrategies) as [DerivOverUnderStrategy, typeof derivOverUnderStrategies[DerivOverUnderStrategy]][]).map(([key, strategy]) => <button key={key} type="button" disabled={derivAutoRunning} className={derivOverUnderStrategy === key ? "selected" : ""} onClick={() => changeDerivOverUnderStrategy(key)}>{strategy.name}</button>)}
 	              </div>
 	            </div>}
+	            {isPairedOverUnder && <OverUnderPairPanel rows={derivPairRows} stake={derivStake} currency={derivCurrency} stopLoss={derivPairStopLoss} running={derivAutoRunning} onStopLoss={(value) => { derivPairStopLossRef.current = value; setDerivPairStopLoss(value); }}/>}
 	            {derivMode === "manual" ? <>
 	              {isOverUnderCategory ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
 	              {needsDigitBarrier(derivContractType) && !isOverUnderCategory && <div className="digit-barrier"><label>Digit / barrière<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection rapide du digit">{selectedContractBarrierOptions.map((digit) => <button key={digit} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
@@ -2183,10 +2295,10 @@ export default function Home() {
 	              <div className={`martingale-panel ${derivMaxSignals > 0 ? "enabled" : ""}`}><div className="martingale-toggle"><span><b>Limite signaux session</b><small>{derivMaxSignals > 0 ? `Stop automatique après ${derivMaxSignals} signal${derivMaxSignals > 1 ? "s" : ""}.` : "Illimité: le bot continue jusqu’au Stop manuel."}</small></span></div><div className="martingale-fields"><label>Nombre de signaux<input type="number" min="0" max="1000" step="1" disabled={derivAutoRunning} value={derivMaxSignals} onChange={(event) => setDerivMaxSignals(Math.min(1000, Math.max(0, Math.trunc(Number(event.target.value) || 0))))}/></label><span>Session <b>{derivMaxSignals > 0 ? `${derivSessionSignals}/${derivMaxSignals}` : "Illimité"}</b></span></div></div>
 	              {needsDigitBarrier(derivContractType) && derivContractType !== "DIGITOVER" && derivContractType !== "DIGITUNDER" && derivAutoDigitBarrierMode === "fixed" && <div className="digit-barrier auto-fixed-barrier"><label>Digit / barrière fixe<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" disabled={derivAutoRunning} value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection du digit fixe">{selectedContractBarrierOptions.map((digit) => <button key={digit} disabled={derivAutoRunning} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
 		              {derivContractType.startsWith("DIGIT") ? <div className="strategy-select auto-digit-strategy"><span>Stratégie automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "DIGITMATCH" ? matchStrategy.name : "Filtre statistique des derniers chiffres"}</b><small>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? `${getOverUnderStrategySummary(derivOverUnderStrategy)} · ${derivOverUnderStrategies[derivOverUnderStrategy].description}` : derivContractType === "DIGITMATCH" ? matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Choisit entre les deux chiffres les plus fréquents sur ${matchStrategy.rules.windowSize} ticks, sans alternance forcée. Compare fréquence, récence et transitions sur les résultats passés ; estimation non garantie.` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `Alterne entre le premier et le deuxième chiffre les plus fréquents des ${matchStrategy.rules.windowSize} derniers ticks. Un contrat à la fois ; les fréquences passées ne sont pas des probabilités de gain.` : matchStrategy.rules.selectionMode === "frequency_window" ? `Prend uniquement DIGITMATCH sur le digit le plus fréquent des ${matchStrategy.rules.windowSize} derniers ticks si sa fréquence atteint ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%.` : "Sélectionne un digit dynamique seulement quand les fenêtres statistiques, le contexte et le payout confirment une Edge positive." : derivContractType === "DIGITDIFF" ? "Differs: le bot sélectionne un digit sous-représenté pour réduire le risque de sortie identique." : "Le bot adapte la barrière selon la distribution récente des derniers chiffres."}</small></div> : <label className="strategy-select">Stratégie automatique<select value={derivStrategy} disabled={derivAutoRunning} onChange={(event) => { const strategy = event.target.value as DerivStrategy; derivStrategyRef.current = strategy; setDerivStrategy(strategy); }}><option value="trend">Tendance multi-horizon</option><option value="momentum">Impulsion filtrée</option><option value="reversal">Retournement confirmé</option></select><small>{derivStrategies[derivStrategy].description}</small></label>}
-	              <div className="ticket-fields auto-fields"><label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise fixe (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivAutoRunning || derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); }}/></label><div className="auto-duration"><span>Durée adaptative</span>{derivContractType === "CALL" || derivContractType === "PUT" ? <><b>2 à 5 ticks <small>SIGNAL</small></b><p>Choisie selon la persistance ou l’accélération détectée.</p></> : <><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
+	              <div className="ticket-fields auto-fields"><label>{isPairedOverUnder ? `Mise fixe par contrat (${derivCurrency})` : derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise fixe (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivAutoRunning || (!isPairedOverUnder && derivHalfBalanceRiskEnabled)} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); }}/></label><div className="auto-duration"><span>Durée adaptative</span>{derivContractType === "CALL" || derivContractType === "PUT" ? <><b>2 à 5 ticks <small>SIGNAL</small></b><p>Choisie selon la persistance ou l’accélération détectée.</p></> : <><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
 	              <div className="auto-execution-status"><span className={derivAutoRunning ? "running" : ""}/><div><b>{derivAutoRunning ? "BOT EN MARCHE" : "BOT EN PAUSE"}</b><small>{derivAutoStatus}</small></div></div>
               <div className="auto-actions"><Button className="auto-play" disabled={derivAutoRunning || !derivTradeConnected} onClick={startDerivAuto}><Play/> Play</Button><Button className="auto-stop" disabled={!derivAutoRunning} onClick={stopDerivAuto}><Square/> Stop</Button></div>
-	              <small className="auto-disclaimer">{derivMultiplePositionsEnabled ? `${derivPositionCount} positions par signal` : "Une seule position par signal"} · {isMatchesDiffersContract(derivContractType) ? "aucun délai automatique pour Matches/Differs" : `pause entre trades ${derivTradePauseEnabled ? "ON: 8 ticks" : "OFF: aucun délai"}`} · arrêt manuel avec Stop. Martingale augmente fortement le risque. Aucune stratégie ne garantit un gain.</small>
+	              <small className="auto-disclaimer">{isPairedOverUnder ? "Deux contrats par signal, un seul indice à la fois. Stop annule les futures entrées ; les contrats engagés restent suivis." : `${derivMultiplePositionsEnabled ? `${derivPositionCount} positions par signal` : "Une seule position par signal"} · ${isMatchesDiffersContract(derivContractType) ? "aucun délai automatique pour Matches/Differs" : `pause entre trades ${derivTradePauseEnabled ? "ON: 8 ticks" : "OFF: aucun délai"}`} · arrêt manuel avec Stop. Martingale augmente fortement le risque.`} Aucune stratégie ne garantit un gain.</small>
             </>}
           </section>
         </div>
