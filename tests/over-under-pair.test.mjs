@@ -16,7 +16,7 @@ function row(symbol, side, frequency) {
   return { ...analyzePairDigits(prices(digits), 3), symbol, name: symbol, fresh: true, status: "Actif" };
 }
 
-function harness({ funds = 100, allow = true, available = () => contracts } = {}) {
+function harness({ funds = 100, allow = true, available = () => contracts, withTransitions = true } = {}) {
   let now = 1_800_000_000_000, seq = 0, signals = 0;
   const sent = [], pending = [], halts = [], statuses = [];
   const scanner = new OverUnderPairScanner({
@@ -39,11 +39,19 @@ function harness({ funds = 100, allow = true, available = () => contracts } = {}
       scanner.handle({ req_id: request.req_id, subscription: { id: `sub${index}` }, pip_size: 3,
         history: { prices: prices(digits), times: digits.map((_, i) => now / 1000 - (199 - i)) } });
     }
+    if (withTransitions) {
+      now += 1000;
+      ["R_25", "1HZ15V"].forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: index === 0 ? 100.007 : 100.002, pip_size: 3 } }));
+      now += 1000;
+      ["R_25", "1HZ15V"].forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: index === 0 ? 100.003 : 100.008, pip_size: 3 } }));
+    }
   }
   const quotes = () => sent.filter((request) => request.proposal === 1).slice(-2);
   const buys = () => sent.filter((request) => request.buy);
   const replyQuote = (request, payout = 0.95) => scanner.handle({ req_id: request.req_id, proposal: { id: `quote${request.req_id}`, ask_price: 0.5, payout } });
   return { scanner, sent, pending, halts, statuses, initialize, quotes, buys, replyQuote, signalCount: () => signals,
+    tick: (index, digit, epoch = now / 1000) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol: index === 0 ? "R_25" : "1HZ15V", epoch, quote: 100 + digit / 1000, pip_size: 3 } }),
+    now: () => now,
     advance: (ms) => { now += ms; scanner.pulse(); }, setAllowed: (value) => { allow = value; } };
 }
 
@@ -181,11 +189,9 @@ function settlePair(h, profits) {
 
 function freshen(h, ms = 4000) {
   h.advance(ms);
-  for (const [index, symbol] of ["R_25", "1HZ15V"].entries()) {
-    const market = h.scanner.markets.get(symbol);
-    const latest = Math.max(...market.points.keys());
-    h.scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: latest + ms / 1000, quote: 100.007, pip_size: 3 } });
-  }
+  h.tick(0, 7); h.tick(1, 2);
+  h.advance(1000);
+  h.tick(0, 3); h.tick(1, 8);
 }
 
 test("pair net result counts once, after both settlements, regardless of leg order", () => {
@@ -367,4 +373,78 @@ test("52-percent candidates still reject quotes whose historical EV is negative"
   const result = evaluatePairQuotes(candidates, [{ ask: 0.5, payout: 0.95 }, { ask: 0.5, payout: 0.95 }], 0.5, 13);
   assert.ok(result.expectedValue < 0);
   assert.equal(result.accepted, false);
+});
+
+test("requires a live losing-to-winning transition on both independent instruments", () => {
+  const h = harness({ withTransitions: false }); h.initialize();
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0, "history alone cannot trigger");
+  h.advance(1000); h.tick(0, 4); h.tick(1, 5);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0, "same-zone digit changes cannot trigger");
+  h.advance(1000); h.tick(0, 5); h.tick(1, 4);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0, "transitions in the wrong direction cannot trigger");
+  h.advance(1000); h.tick(0, 4);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0, "one ready instrument is insufficient");
+  h.tick(1, 5);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 2);
+  assert.match(h.statuses.at(-1), /5 → 4 · Under 5 R_25 \+ 4 → 5 · Over 4 1HZ15V/);
+  h.quotes().forEach((quote) => h.replyQuote(quote));
+  assert.equal(h.buys().length, 2);
+});
+
+test("duplicate and out-of-order ticks cannot manufacture a transition", () => {
+  const h = harness({ withTransitions: false }); h.initialize();
+  h.advance(1000); h.tick(0, 5); h.tick(1, 4);
+  h.tick(0, 4); h.tick(1, 5);
+  h.tick(0, 4, h.now() / 1000 - 1); h.tick(1, 5, h.now() / 1000 - 1);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0);
+  h.advance(1000); h.tick(0, 4); h.tick(1, 5);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 2, "a subsequent real crossing still works");
+});
+
+test("old transitions expire even when same-zone ticks keep both streams fresh", () => {
+  const h = harness(); h.initialize();
+  h.advance(6000); h.tick(0, 4); h.tick(1, 9);
+  assert.ok(h.scanner.rows().every((row) => row.fresh));
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 0);
+});
+
+test("a consumed transition cannot open another pair after settlement", () => {
+  const h = harness(); h.initialize(); settlePair(h, [0.45, 0.45]);
+  h.advance(4000); h.tick(0, 4); h.tick(1, 9);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.sent.filter((request) => request.proposal).length, 2);
+  freshen(h, 1000);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.sent.filter((request) => request.proposal).length, 4);
+});
+
+test("returning to the losing zone while quoting cancels both purchases", () => {
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
+  const [under, over] = h.quotes(); h.replyQuote(under);
+  h.advance(1000); h.tick(0, 9);
+  h.replyQuote(over);
+  assert.equal(h.buys().length, 0);
+});
+
+test("fresh quotes cannot revive an expired transition", () => {
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
+  h.advance(6000); h.tick(0, 4); h.tick(1, 9);
+  h.quotes().forEach((quote) => h.replyQuote(quote));
+  assert.equal(h.buys().length, 0);
+});
+
+test("a zone exit with a future timestamp invalidates the previous trigger", () => {
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
+  const [under, over] = h.quotes(); h.replyQuote(under);
+  h.tick(0, 9, h.now() / 1000 + 1);
+  h.replyQuote(over);
+  assert.equal(h.buys().length, 0);
 });

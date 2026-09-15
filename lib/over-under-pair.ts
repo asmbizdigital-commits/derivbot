@@ -26,7 +26,8 @@ export type PairMarket = {
   symbol: string; name: string; pipSize: number | null;
   points: Map<number, number>; updatedAt: number; status: string; supportsUnder: boolean; supportsOver: boolean;
 };
-export type PairRow = PairAnalysis & { symbol: string; name: string; status: string; fresh: boolean };
+export type PairTransition = { from: number; to: number; epoch: number };
+export type PairRow = PairAnalysis & { symbol: string; name: string; status: string; fresh: boolean; transition?: PairTransition | null; transitionReady?: boolean; underTransitionReady?: boolean; overTransitionReady?: boolean };
 type Message = Record<string, any>; // API envelopes are validated at each boundary below.
 
 // Tuple order everywhere: Under 5 on the first instrument, Over 4 on the second.
@@ -152,6 +153,8 @@ export class OverUnderPairScanner {
   private discovered = false;
   private now: () => number;
   private cooldown = new Map<string, number>();
+  private transitions = new Map<string, PairTransition>();
+  private consumedTransitions = new Map<string, number>();
   private quoteBatch: { rows: [PairRow, PairRow]; stake: number; ids: number[]; quotes: (Quote | null)[]; startedAt: number } | null = null;
   private buys = new Map<number, { leg: PairLeg; resolved: boolean; trade: PairTrade; index: number }>();
   private openContracts = new Set<number>();
@@ -175,6 +178,8 @@ export class OverUnderPairScanner {
     this.discovered = false;
     this.markets.clear();
     this.cooldown.clear();
+    this.transitions.clear();
+    this.consumedTransitions.clear();
     this.enqueue({ active_symbols: "brief" }, { kind: "symbols" });
     this.pulse();
     this.timer = setInterval(() => this.pulse(), 250);
@@ -240,7 +245,13 @@ export class OverUnderPairScanner {
       const available = market.status === "Actif" && fresh && !paused;
       const underEligible = available && market.supportsUnder && analysis.underEligible;
       const overEligible = available && market.supportsOver && analysis.overEligible;
-      return { ...analysis, underEligible, overEligible, eligible: underEligible || overEligible, symbol: market.symbol, name: market.name, fresh,
+      const transition = this.transitions.get(market.symbol) ?? null;
+      const transitionFresh = !!transition && transition.epoch > (this.consumedTransitions.get(market.symbol) ?? -Infinity)
+        && now - transition.epoch * 1000 >= 0 && now - transition.epoch * 1000 <= 5000;
+      const underTransitionReady = transitionFresh && transition!.from >= 5 && transition!.to < 5;
+      const overTransitionReady = transitionFresh && transition!.from < 5 && transition!.to >= 5;
+      const transitionReady = (underEligible && underTransitionReady) || (overEligible && overTransitionReady);
+      return { ...analysis, underEligible, overEligible, eligible: underEligible || overEligible, symbol: market.symbol, name: market.name, fresh, transition, transitionReady, underTransitionReady, overTransitionReady,
         status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 100 ? "Collecte (100 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
     }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || Math.max(b.over, b.under) - Math.max(a.over, a.under) || a.symbol.localeCompare(b.symbol));
   }
@@ -252,18 +263,22 @@ export class OverUnderPairScanner {
       return;
     }
     const available = this.rows();
-    const rows = selectPairMarkets(available);
+    const rows = selectPairMarkets(available.map((row) => ({ ...row, underEligible: row.underEligible && !!row.underTransitionReady, overEligible: row.overEligible && !!row.overTransitionReady })));
     if (!rows) {
       const under = available.filter((row) => row.underEligible).length;
       const over = available.filter((row) => row.overEligible).length;
-      this.options.onStatus(`Attente · ${under} candidat(s) Under 5 · ${over} candidat(s) Over 4 · deux indices distincts requis`);
+      const ready = available.filter((row) => row.eligible && row.transitionReady).length;
+      this.options.onStatus(`Attente transition · ${under} candidat(s) Under 5 · ${over} candidat(s) Over 4 · ${ready} indice(s) avec passage récent vers la zone gagnante`);
       return;
     }
     if (!Number.isFinite(stake) || stake < 0.35 || !this.options.canBuy(2 * stake)) return;
     const ids = [this.options.nextId(), this.options.nextId()];
     this.quoteBatch = { rows, stake, ids, quotes: [null, null], startedAt: this.now() };
+    // Consume at the quote attempt, so a refusal or duplicated callback cannot
+    // reuse the same digit change to open a later pair.
+    rows.forEach((row) => this.consumedTransitions.set(row.symbol, row.transition!.epoch));
     ids.forEach((id) => this.ownedIds.add(id));
-    this.options.onStatus(`Cotations Under 5 · ${rows[0].symbol} + Over 4 · ${rows[1].symbol} · total ${(stake * 2).toFixed(2)} ${currency}`);
+    this.options.onStatus(`Transition ${rows[0].transition!.from} → ${rows[0].transition!.to} · Under 5 ${rows[0].symbol} + ${rows[1].transition!.from} → ${rows[1].transition!.to} · Over 4 ${rows[1].symbol} · total ${(stake * 2).toFixed(2)} ${currency}`);
     try {
       ids.forEach((id, index) => this.options.send({ proposal: 1, underlying_symbol: rows[index].symbol, contract_type: PAIR_SIDES[index].contractType, barrier: PAIR_SIDES[index].barrier, amount: stake, basis: "stake", currency, duration: 1, duration_unit: "t", req_id: id }));
     } catch { this.halt("Paire annulée : connexion perdue pendant les cotations."); }
@@ -277,9 +292,11 @@ export class OverUnderPairScanner {
     const latest = this.rows();
     const current = batch.rows.map((selected) => latest.find((row) => row.symbol === selected.symbol) ?? { ...selected, eligible: false, fresh: false }) as [PairRow, PairRow];
     const evaluation = evaluatePairQuotes(current, quotes, batch.stake, this.markets.size);
-    if (!this.running || quotes.some((quote) => this.now() - quote.receivedAt > 2500) || !evaluation.accepted || !this.options.canBuy(evaluation.cost)) {
+    const transitionsFresh = batch.rows.every((row, index) => row.transition && current[index].transition?.epoch === row.transition.epoch
+      && this.now() - row.transition.epoch * 1000 >= 0 && this.now() - row.transition.epoch * 1000 <= 5000);
+    if (!this.running || !transitionsFresh || quotes.some((quote) => this.now() - quote.receivedAt > 2500) || !evaluation.accepted || !this.options.canBuy(evaluation.cost)) {
       batch.rows.forEach((row) => this.cooldown.set(row.symbol, this.now() + 10000));
-      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · entrée refusée : données/cotations périmées, ou espérance historique non positive sur un contrat · EV paire ${evaluation.expectedValue.toFixed(3)}`);
+      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · entrée refusée : transition invalidée ou données/cotations périmées, ou espérance historique non positive sur un contrat · EV paire ${evaluation.expectedValue.toFixed(3)}`);
       return;
     }
     this.purchaseStartedAt = this.now();
@@ -434,15 +451,29 @@ export class OverUnderPairScanner {
       if (tick && (tick.symbol === market.symbol || tick.underlying_symbol === market.symbol)) {
         const precision = Number(tick.pip_size);
         if (Number.isInteger(precision) && precision >= 0 && precision <= 12) market.pipSize = precision;
-        this.addPoint(market, Number(tick.epoch), Number(tick.quote));
+        this.addPoint(market, Number(tick.epoch), Number(tick.quote), true);
       }
     }
     this.options.onUpdate();
     return true;
   }
 
-  private addPoint(market: PairMarket, epoch: number, price: number) {
+  private addPoint(market: PairMarket, epoch: number, price: number, live = false) {
     if (!Number.isFinite(epoch) || !Number.isFinite(price) || Math.abs(price) >= 1e21) return;
+    const previous = [...market.points].at(-1);
+    if (live && previous && epoch <= previous[0]) return;
+    if (live && previous && market.pipSize !== null && Number.isInteger(market.pipSize) && market.pipSize >= 0 && market.pipSize <= 12) {
+      const from = Number(previous[1].toFixed(market.pipSize).at(-1));
+      const to = Number(price.toFixed(market.pipSize).at(-1));
+      if ((from < 5) !== (to < 5)) {
+        // A zone exit always invalidates the prior event, even when the new
+        // timestamp is unsuitable to create a fresh entry signal.
+        this.transitions.delete(market.symbol);
+        if (epoch * 1000 <= this.now() && this.now() - epoch * 1000 <= 5000 && epoch - previous[0] <= 5) {
+          this.transitions.set(market.symbol, { from, to, epoch });
+        }
+      }
+    }
     market.points.set(epoch, price);
     market.points = new Map([...market.points].sort((a, b) => a[0] - b[0]).slice(-200));
     const latest = [...market.points.keys()].at(-1)! * 1000;

@@ -246,7 +246,7 @@ const derivStrategies: Record<DerivStrategy, { name: string; description: string
 };
 
 const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; description: string; contractType: "DIGITOVER" | "DIGITUNDER"; barrier: number }> = {
-  under5_over4_cross: { name: "Under 5 + Over 4", description: "Analyse les fréquences sur tous les indices de volatilité disponibles ; Under 5 et Over 4 sur deux indices distincts qualifiés.", contractType: "DIGITUNDER", barrier: 5 },
+  under5_over4_cross: { name: "Under 5 + Over 4", description: "Analyse les fréquences sur toutes les volatilités et attend un passage vers la zone gagnante pour Under 5 et Over 4 sur deux indices distincts.", contractType: "DIGITUNDER", barrier: 5 },
   under8_transition: { name: "Under 8", description: "Attend un digit 9, puis entre Under 8 dès que le flux passe à un autre digit.", contractType: "DIGITUNDER", barrier: 8 },
   over2: { name: "Over 2", description: "Entre Over 2 quand les derniers chiffres favorisent 3 à 9.", contractType: "DIGITOVER", barrier: 2 },
   over5: { name: "Over 5", description: "Attend un digit 4, puis entre Over 5 dès que le flux passe à un autre digit.", contractType: "DIGITOVER", barrier: 5 },
@@ -254,7 +254,7 @@ const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; d
 };
 
 function getOverUnderStrategySummary(strategy: DerivOverUnderStrategy) {
-  if (strategy === "under5_over4_cross") return "Under 5 + Over 4 · deux indices distincts";
+  if (strategy === "under5_over4_cross") return "Transition vers la zone gagnante · deux indices distincts";
   const config = derivOverUnderStrategies[strategy];
   if (strategy === "under8_transition") return "Déclenche après 9 -> autre digit";
   if (strategy === "over5") return "Déclenche après 4 -> autre digit";
