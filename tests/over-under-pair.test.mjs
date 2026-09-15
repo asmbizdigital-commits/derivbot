@@ -149,19 +149,19 @@ test("stream correlation survives missing echo and duplicate/out-of-order ticks"
   assert.equal(h.scanner.rows().find((row) => row.symbol === "R_25").fresh, false);
 });
 
-test("rejects a positive point estimate when uncertainty or combined costs erase the edge", () => {
+test("reactive entry accepts positive historical EV without requiring a positive confidence bound", () => {
   const analysis = [row("R_25", "under", 0.55), row("1HZ15V", "over", 0.55)];
   const quotes = [{ ask: 0.5, payout: 0.95 }, { ask: 0.5, payout: 0.95 }];
   const result = evaluatePairQuotes(analysis, quotes, 0.5, 13);
   assert.equal(analysis[0].underEligible, true);
   assert.ok(result.expectedValue > 0);
   assert.ok(result.conservativeExpectedValue < 0);
-  assert.equal(result.accepted, false);
+  assert.equal(result.accepted, true);
   assert.ok(result.conservativeExpectedValue < evaluatePairQuotes(analysis, quotes, 0.5, 1).conservativeExpectedValue);
   const strong = [row("R_25", "under", 0.8), row("1HZ15V", "over", 0.8)];
   assert.equal(evaluatePairQuotes(strong, quotes, 0.5).accepted, true, "one payout need not cover two stakes");
   assert.equal(evaluatePairQuotes(strong, [{ ask: 0.5, payout: 0.6 }, { ask: 0.5, payout: 2 }], 0.5).accepted, false, "reject a losing leg despite profitable partner");
-  assert.equal(analyzePairDigits(prices(Array(199).fill(4)), 3).eligible, false);
+  assert.equal(analyzePairDigits(prices(Array(99).fill(4)), 3).eligible, false);
 });
 
 function settlePair(h, profits) {
@@ -307,11 +307,11 @@ test("loss cooldown belongs only to the instrument that lost its own contracts",
   assert.equal(h.scanner.results().stats.consecutiveLosses, 2, "a single winning leg can still leave a losing pair");
 });
 
-test("requests and retains 200 ticks, qualifying at 200 rather than 500", () => {
+test("requests and retains 200 ticks, qualifying from 100", () => {
   const h = harness(); h.initialize();
   assert.ok(h.sent.filter((request) => request.ticks_history).every((request) => request.count === 200));
-  assert.equal(analyzePairDigits(prices(Array(199).fill(4)), 3).eligible, false);
-  assert.equal(analyzePairDigits(prices(Array(200).fill(4)), 3).underEligible, true);
+  assert.equal(analyzePairDigits(prices(Array(99).fill(4)), 3).eligible, false);
+  assert.equal(analyzePairDigits(prices(Array(100).fill(4)), 3).underEligible, true);
   const recent = analyzePairDigits(prices([...Array(800).fill(9), ...Array(200).fill(4)]), 3);
   assert.equal(recent.sampleSize, 200);
   assert.equal(recent.under, 1);
@@ -338,4 +338,33 @@ test("a user stake above 2 is quoted and bought unchanged when funds permit", ()
   assert.deepEqual(h.pending.map((pending) => pending.leg.stake), [3, 3]);
   const lowFunds = harness({ funds: 5 }); lowFunds.initialize(); lowFunds.scanner.requestBestPair(3, "USD");
   assert.equal(lowFunds.quotes().length, 0);
+});
+
+test("moderate 54-percent histories now send the pair with a small positive historical EV", () => {
+  const h = harness(); h.initialize();
+  for (const [symbol, side] of [["R_25", "under"], ["1HZ15V", "over"]]) {
+    const market = h.scanner.markets.get(symbol);
+    market.points = new Map([...market.points.keys()].map((epoch, i) => [epoch, 100 + ((((i * 37) % 100 < 54) === (side === "under")) ? 4 : 5) / 1000]));
+  }
+  const candidates = selectPairMarkets(h.scanner.rows());
+  assert.equal(candidates[0].under, 0.54);
+  assert.equal(candidates[1].over, 0.54);
+  const evaluation = evaluatePairQuotes(candidates, [{ ask: 0.5, payout: 0.95 }, { ask: 0.5, payout: 0.95 }], 0.5, 13);
+  assert.ok(evaluation.expectedValue > 0 && evaluation.expectedValue < evaluation.cost * 0.02);
+  assert.ok(evaluation.conservativeExpectedValue < 0);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 2);
+  h.quotes().forEach((quote) => h.replyQuote(quote));
+  assert.equal(h.buys().length, 2);
+  assert.equal(h.signalCount(), 1);
+  assert.match(h.statuses.at(-1), /EV historique/);
+});
+
+test("52-percent candidates still reject quotes whose historical EV is negative", () => {
+  const candidates = [row("R_25", "under", 0.52), row("1HZ15V", "over", 0.52)];
+  assert.equal(candidates[0].underEligible, true);
+  assert.equal(candidates[1].overEligible, true);
+  const result = evaluatePairQuotes(candidates, [{ ask: 0.5, payout: 0.95 }, { ask: 0.5, payout: 0.95 }], 0.5, 13);
+  assert.ok(result.expectedValue < 0);
+  assert.equal(result.accepted, false);
 });

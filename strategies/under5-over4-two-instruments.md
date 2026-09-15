@@ -1,4 +1,4 @@
-# Under 5 + Over 4 — deux instruments distincts
+# Under 5 + Over 4 — deux instruments distincts, mode réactif
 
 Stratégie intégrée dans **Deriv Bot → Under / Over → Under 5 + Over 4**. Ce guide décrit l’option du bot ; il ne s’importe pas dans l’importeur Markdown réservé à Matches.
 
@@ -17,9 +17,9 @@ Les deux achats ne forment pas une opération atomique : leurs heures d’exécu
 
 1. Découvrir tous les indices de volatilité disponibles avec `active_symbols`, hors marchés fermés ou suspendus.
 2. Vérifier séparément `contracts_for` : DIGITUNDER barrière 5 pour un candidat Under ; DIGITOVER barrière 4 pour un candidat Over. La durée de 1 tick doit être disponible. Un marché qui propose un seul des deux côtés peut être sélectionné pour ce côté.
-3. Charger jusqu’à 200 ticks par indice, avec 200 ticks avant qualification. Utiliser la précision de l’API ; conserver les zéros finaux, trier et dédupliquer par timestamp. Écarter un flux âgé de plus de 5 secondes.
-4. Pour Under, compter les chiffres **0–4** de cet indice ; pour Over, compter **5–9**. Chaque côté exige au moins 55 % sur les 200 derniers ticks et 52 % sur les 50 derniers ticks.
-5. Comparer les combinaisons ordonnées Under/Over admissibles, avec symboles différents. Sélectionner la plus grande somme des deux fréquences prudentes définies ci-dessous ; départager les égalités par symbole. Le choix est effectué avant cotations, sans prétendre comparer les payouts de toutes les combinaisons.
+3. Charger jusqu’à 200 ticks par indice, avec au moins 100 ticks avant qualification. Utiliser la précision de l’API ; conserver les zéros finaux, trier et dédupliquer par timestamp. Écarter un flux âgé de plus de 5 secondes.
+4. Pour Under, compter les chiffres **0–4** de cet indice ; pour Over, compter **5–9**. Chaque côté exige au moins 52 % sur la fenêtre disponible (100 à 200 ticks) et 50 % sur les 50 derniers ticks.
+5. Comparer les combinaisons ordonnées Under/Over admissibles, avec symboles différents. Sélectionner la plus grande somme des deux fréquences lissées définies ci-dessous ; départager les égalités par symbole. Le choix est effectué avant cotations, sans prétendre comparer les payouts de toutes les combinaisons.
 
 L’indice du graphique reste un réglage d’affichage indépendant. Le tableau de scan indique les fréquences Under et Over de chaque indice. Le journal des paires affiche le symbole propre à chaque contrat.
 
@@ -27,9 +27,9 @@ L’indice du graphique reste un réglage d’affichage indépendant. Le tableau
 
 Chaque fréquence est lissée vers 50 % : `(nombre de chiffres gagnants + 25) / (nombre de ticks + 50)`.
 
-Pour chaque côté, la fréquence prudente est le minimum entre cette estimation lissée et `fréquence observée − sqrt(ln(2 × M / 0,05) / (2 × N))`, limité à zéro. `M` est le nombre d’indices découverts ; `N` est le nombre de ticks de l’instrument concerné. Ces bornes supposent des observations indépendantes dans un échantillon fixe. Elles ne garantissent pas un niveau de confiance de 95 % après des sélections répétées en direct.
+Pour chaque côté, la fréquence prudente est le minimum entre cette estimation lissée et `fréquence observée − sqrt(ln(2 × M / 0,05) / (2 × N))`, limité à zéro. `M` est le nombre d’indices découverts ; `N` est le nombre de ticks de l’instrument concerné. Ces bornes supposent des observations indépendantes dans un échantillon fixe. Elles ne garantissent pas un niveau de confiance de 95 % après des sélections répétées en direct. **En mode réactif, cette borne reste un diagnostic interne et ne bloque plus l’achat.**
 
-Les deux cotations sont demandées avant achat. Pour chaque contrat : prix positif, au plus la mise prévue, payout supérieur à son prix, et `fréquence prudente × payout − prix > 0`. L’espérance prudente cumulée des deux contrats doit dépasser **2 % du coût total**. Le payout désigne le versement total, mise comprise.
+Les deux cotations sont demandées avant achat. Pour chaque contrat : prix positif, au plus la mise prévue, payout supérieur à son prix, et `fréquence lissée × payout − prix > 0`. L’espérance historique cumulée doit être positive ; le seuil supplémentaire de 2 % est supprimé. Une cotation à espérance historique négative sur un seul contrat reste refusée, même si l’autre contrat pourrait compenser. Le payout désigne le versement total, mise comprise.
 
 Les fréquences et la fraîcheur des **deux** instruments sont revérifiées quand les cotations arrivent. Une dégradation, une cotation invalide, refusée, trop ancienne ou absente annule l’ensemble avant achat. Le bot ne remplace pas un instrument tout en conservant sa cotation précédente.
 
@@ -49,6 +49,6 @@ Le filtre n’exige plus qu’un seul payout couvre les deux mises : cette condi
 
 Arrêter l’ancienne session, attendre le règlement des contrats en cours, puis recharger l’application. Choisir **Under 5 + Over 4** et lancer une nouvelle session avec Play. Les contrats déjà achetés gardent leur instrument et leur barrière d’origine.
 
-Les fréquences historiques ne démontrent pas un avantage prédictif. Le filtre peut rester longtemps sans signal et ne garantit aucune rentabilité. Les vérifications utilisent des achats simulés ; aucun ordre réel n’est nécessaire pour tester le code.
+Le mode réactif accepte des signaux que la borne prudente rejetterait : l’incertitude statistique est plus grande. Les fréquences historiques ne démontrent pas un avantage prédictif. Le filtre peut rester longtemps sans signal et ne garantit aucune rentabilité. Les vérifications utilisent des achats simulés ; aucun ordre réel n’est nécessaire pour tester le code.
 
 Règles de règlement : [documentation officielle Deriv Over/Under](https://legacy-docs.deriv.com/docs/digit-overunder).

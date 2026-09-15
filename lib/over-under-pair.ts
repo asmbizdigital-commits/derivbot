@@ -45,8 +45,8 @@ export function analyzePairDigits(prices: number[], pipSize: number | null): Pai
   const overCount = digits.length - underCount;
   const under = underCount / digits.length;
   const over = overCount / digits.length;
-  const qualifies = (wins: (digit: number) => boolean, frequency: number) => digits.length >= 200 && frequency >= 0.55
-    && digits.slice(-50).filter(wins).length / 50 >= 0.52;
+  const qualifies = (wins: (digit: number) => boolean, frequency: number) => digits.length >= 100 && frequency >= 0.52
+    && digits.slice(-50).filter(wins).length / 50 >= 0.50;
   const underEligible = qualifies((digit) => digit < 5, under);
   const overEligible = qualifies((digit) => digit > 4, over);
   return { sampleSize: digits.length, over, under,
@@ -63,7 +63,7 @@ function lowerWinRate(row: PairAnalysis, side: "under" | "over", marketCount: nu
   return Math.max(0, Math.min((side === "under" ? row.underEstimate : row.overEstimate), row[side] - margin));
 }
 
-export function selectPairMarkets(rows: PairRow[], marketCount = rows.length): [PairRow, PairRow] | null {
+export function selectPairMarkets(rows: PairRow[]): [PairRow, PairRow] | null {
   let best: [PairRow, PairRow] | null = null;
   let bestScore = -Infinity;
   // Consider every ordered combination, excluding the same instrument.
@@ -72,7 +72,7 @@ export function selectPairMarkets(rows: PairRow[], marketCount = rows.length): [
     if (!under.eligible || !under.underEligible || !under.fresh) continue;
     for (const over of ordered) {
       if (over.symbol === under.symbol || !over.eligible || !over.overEligible || !over.fresh) continue;
-      const score = lowerWinRate(under, "under", marketCount) + lowerWinRate(over, "over", marketCount);
+      const score = under.underEstimate + over.overEstimate;
       if (score > bestScore) { bestScore = score; best = [under, over]; }
     }
   }
@@ -115,13 +115,15 @@ export function evaluatePairQuotes(rows: [PairRow, PairRow], quotes: { ask: numb
   const expectedValue = quotes.length === 2 ? rows[0].underEstimate * quotes[0].payout + rows[1].overEstimate * quotes[1].payout - cost : -Infinity;
   const underLower = lowerWinRate(rows[0], "under", marketCount);
   const overLower = lowerWinRate(rows[1], "over", marketCount);
-  const legExpectedValues = quotes.length === 2 ? [underLower * quotes[0].payout - quotes[0].ask, overLower * quotes[1].payout - quotes[1].ask] : [-Infinity, -Infinity];
-  const conservativeExpectedValue = legExpectedValues.reduce((sum, value) => sum + value, 0);
+  const legExpectedValues = quotes.length === 2 ? [rows[0].underEstimate * quotes[0].payout - quotes[0].ask, rows[1].overEstimate * quotes[1].payout - quotes[1].ask] : [-Infinity, -Infinity];
+  // Retained for diagnosis only: the reactive entry mode uses historical point
+  // estimates, which are not a statistically established predictive advantage.
+  const conservativeExpectedValue = quotes.length === 2 ? underLower * quotes[0].payout + overLower * quotes[1].payout - cost : -Infinity;
   // With 50/50 barriers, one winning payout may NOT cover both stakes.
   // Require each leg to pass its own quote check, then check their summed EV.
   return { cost, expectedValue, conservativeExpectedValue, underLower, overLower, legExpectedValues,
     accepted: valid && rows.every((row) => row.eligible && row.fresh) && rows[0].underEligible && rows[1].overEligible
-      && legExpectedValues.every((value) => value > 0) && conservativeExpectedValue > cost * 0.02 };
+      && legExpectedValues.every((value) => value > 0) && expectedValue > 0 };
 }
 
 type PairOptions = {
@@ -239,7 +241,7 @@ export class OverUnderPairScanner {
       const underEligible = available && market.supportsUnder && analysis.underEligible;
       const overEligible = available && market.supportsOver && analysis.overEligible;
       return { ...analysis, underEligible, overEligible, eligible: underEligible || overEligible, symbol: market.symbol, name: market.name, fresh,
-        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 200 ? "Collecte (200 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
+        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 100 ? "Collecte (100 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
     }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || Math.max(b.over, b.under) - Math.max(a.over, a.under) || a.symbol.localeCompare(b.symbol));
   }
 
@@ -249,8 +251,14 @@ export class OverUnderPairScanner {
       this.halt("Protection des gains : la perte d’une nouvelle paire pourrait rendre plus de 50 % du pic de bénéfice. Session arrêtée.");
       return;
     }
-    const rows = selectPairMarkets(this.rows(), this.markets.size);
-    if (!rows) { this.options.onStatus("Attente de deux indices distincts qualifiés : Under 5 et Over 4."); return; }
+    const available = this.rows();
+    const rows = selectPairMarkets(available);
+    if (!rows) {
+      const under = available.filter((row) => row.underEligible).length;
+      const over = available.filter((row) => row.overEligible).length;
+      this.options.onStatus(`Attente · ${under} candidat(s) Under 5 · ${over} candidat(s) Over 4 · deux indices distincts requis`);
+      return;
+    }
     if (!Number.isFinite(stake) || stake < 0.35 || !this.options.canBuy(2 * stake)) return;
     const ids = [this.options.nextId(), this.options.nextId()];
     this.quoteBatch = { rows, stake, ids, quotes: [null, null], startedAt: this.now() };
@@ -271,7 +279,7 @@ export class OverUnderPairScanner {
     const evaluation = evaluatePairQuotes(current, quotes, batch.stake, this.markets.size);
     if (!this.running || quotes.some((quote) => this.now() - quote.receivedAt > 2500) || !evaluation.accepted || !this.options.canBuy(evaluation.cost)) {
       batch.rows.forEach((row) => this.cooldown.set(row.symbol, this.now() + 10000));
-      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · refus · EV estimée ${evaluation.expectedValue.toFixed(3)} / prudente ${evaluation.conservativeExpectedValue.toFixed(3)} · marge requise 2 % du coût`);
+      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · entrée refusée : données/cotations périmées, ou espérance historique non positive sur un contrat · EV paire ${evaluation.expectedValue.toFixed(3)}`);
       return;
     }
     this.purchaseStartedAt = this.now();
@@ -293,7 +301,7 @@ export class OverUnderPairScanner {
     });
     this.options.onSignal();
     this.publishResults();
-    this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · paire envoyée · EV prudente ${evaluation.conservativeExpectedValue.toFixed(3)}`);
+    this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · paire envoyée · EV historique ${evaluation.expectedValue.toFixed(3)}`);
     try { requests.forEach((request) => this.options.send(request)); }
     catch {
       trade.status = "incomplete";
