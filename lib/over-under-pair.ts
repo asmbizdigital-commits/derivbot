@@ -13,10 +13,9 @@ export type PairTrade = {
 export type PairStats = { completed: number; profitable: number; losing: number; netProfit: number; peakProfit: number; consecutiveLosses: number };
 export const EMPTY_PAIR_STATS: PairStats = { completed: 0, profitable: 0, losing: 0, netProfit: 0, peakProfit: 0, consecutiveLosses: 0 };
 
-// Zero disables the optional monetary session limit; balance is checked separately.
-export function pairBudgetAllows(cost: number, sessionPnl: number, budget: number) {
-  return Number.isFinite(cost) && cost > 0 && Number.isFinite(sessionPnl) && Number.isFinite(budget) && budget >= 0
-    && (budget === 0 || sessionPnl - cost >= -budget - 1e-8);
+// The pair has no fixed monetary cap; both stakes must fit the available balance.
+export function pairBalanceAllows(cost: number, balance: number | null) {
+  return Number.isFinite(cost) && cost > 0 && balance !== null && Number.isFinite(balance) && balance >= cost;
 }
 
 export function pairProfitProtection(stats: PairStats, nextCost: number) {

@@ -6,8 +6,8 @@ import ts from "typescript";
 
 const source = readFileSync(new URL("../lib/over-under-pair.ts", import.meta.url), "utf8").replaceAll("export ", "");
 const context = vm.createContext({ setInterval: () => 1, clearInterval() {} });
-vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBudgetAllows, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
-const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBudgetAllows, EMPTY_PAIR_STATS } = context.api;
+vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBalanceAllows, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
+const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBalanceAllows, EMPTY_PAIR_STATS } = context.api;
 const prices = (digits) => digits.map((digit) => 100 + digit / 1000);
 const contracts = ["DIGITOVER", "DIGITUNDER"].map((contract_type) => ({ contract_type, min_contract_duration: "1t", max_contract_duration: "10t" }));
 
@@ -319,15 +319,12 @@ test("requests and retains 200 ticks, qualifying at 200 rather than 500", () => 
   assert.equal(h.scanner.markets.get("R_25").points.size, 200);
 });
 
-test("zero disables the monetary budget while explicit limits and invalid inputs remain enforced", () => {
-  assert.equal(pairBudgetAllows(6, 0, 0), true);
-  assert.equal(pairBudgetAllows(6, -30, 0), true);
-  assert.equal(pairBudgetAllows(6, 0, 4), false);
-  assert.equal(pairBudgetAllows(6, 2, 4), true);
-  assert.equal(pairBudgetAllows(6, 1.99, 4), false);
-  for (const invalid of [-1, NaN, Infinity]) assert.equal(pairBudgetAllows(6, 0, invalid), false);
-  assert.equal(pairBudgetAllows(Infinity, 0, 0), false);
-  assert.equal(pairBudgetAllows(0, 0, 0), false);
+test("pair funding has no fixed monetary cap and rejects unavailable or invalid balances", () => {
+  assert.equal(pairBalanceAllows(6, 6), true);
+  assert.equal(pairBalanceAllows(20, 100), true);
+  assert.equal(pairBalanceAllows(6, 5.99), false);
+  for (const invalid of [null, -1, NaN, Infinity]) assert.equal(pairBalanceAllows(6, invalid), false);
+  for (const invalid of [0, -1, NaN, Infinity]) assert.equal(pairBalanceAllows(invalid, 100), false);
 });
 
 test("a user stake above 2 is quoted and bought unchanged when funds permit", () => {

@@ -37,8 +37,8 @@ Le filtre n’exige plus qu’un seul payout couvre les deux mises : cette condi
 
 ## Mise et protections
 
-- Régler la mise fixe **par contrat** : deux fois cette mise est engagée par signal. Martingale, double risque et demi-solde sont ignorés pour cette stratégie.
-- Le budget monétaire de session est **désactivé par défaut (0)** : aucun plafond fixe de 2 par contrat. La mise saisie est utilisée sans réduction ; le coût des deux contrats doit tenir dans la balance. Un budget positif reste facultatif : si activé, la perte maximale de la prochaine paire doit aussi tenir dans ce budget. Les pauses après pertes et la protection du pic restent actives.
+- Régler la **mise par contrat** directement dans le panneau Under 5 + Over 4 : deux fois cette mise est engagée par signal. Le « total calculé » est le montant des deux mises, pas une limite. Martingale, double risque et demi-solde sont ignorés pour cette stratégie.
+- Aucun budget monétaire de session ni plafond fixe de 2 par contrat n’est appliqué à cette stratégie. La mise saisie est envoyée sans réduction, sous réserve que le solde couvre les deux contrats et que Deriv accepte les cotations. Les pauses après pertes et la protection du pic restent actives.
 - Après **2 contrats perdants consécutifs sur un même instrument**, exclure cet instrument pendant 60 secondes. Une perte n’est pas attribuée à son partenaire. Une pause limite l’exposition et ne rend pas les chiffres suivants plus prévisibles.
 - Après **3 paires déficitaires consécutives**, tous instruments confondus, arrêter les entrées. Le résultat d’une paire est la somme des profits nets réellement reçus pour ses deux contrats.
 - Dès que le pic de bénéfice atteint le coût de deux paires, refuser une entrée dont la perte maximale ramènerait le résultat sous 50 % de ce pic.
