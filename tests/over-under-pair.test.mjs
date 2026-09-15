@@ -6,12 +6,17 @@ import ts from "typescript";
 
 const source = readFileSync(new URL("../lib/over-under-pair.ts", import.meta.url), "utf8").replaceAll("export ", "");
 const context = vm.createContext({ setInterval: () => 1, clearInterval() {} });
-vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPair, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
-const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPair, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS } = context.api;
+vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
+const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS } = context.api;
 const prices = (digits) => digits.map((digit) => 100 + digit / 1000);
 const contracts = ["DIGITOVER", "DIGITUNDER"].map((contract_type) => ({ contract_type, min_contract_duration: "1t", max_contract_duration: "10t" }));
 
-function harness({ funds = 100, allow = true } = {}) {
+function row(symbol, side, frequency) {
+  const digits = Array.from({ length: 1000 }, (_, i) => ((i * 37) % 100 < Math.round(frequency * 100)) === (side === "under") ? 4 : 5);
+  return { ...analyzePairDigits(prices(digits), 3), symbol, name: symbol, fresh: true, status: "Actif" };
+}
+
+function harness({ funds = 100, allow = true, available = () => contracts } = {}) {
   let now = 1_800_000_000_000, seq = 0, signals = 0;
   const sent = [], pending = [], halts = [], statuses = [];
   const scanner = new OverUnderPairScanner({
@@ -25,28 +30,29 @@ function harness({ funds = 100, allow = true } = {}) {
     scanner.handle({ req_id: sent[0].req_id, active_symbols: ["R_25", "1HZ15V"].map((underlying_symbol) => ({ underlying_symbol, underlying_symbol_name: `Volatility ${underlying_symbol}`, pip_size: 0.001 })) });
     for (let index = 0; index < 2; index++) {
       scanner.pulse();
-      scanner.handle({ req_id: sent.at(-1).req_id, contracts_for: { available: contracts } });
+      scanner.handle({ req_id: sent.at(-1).req_id, contracts_for: { available: available(index) } });
     }
     for (let index = 0; index < 2; index++) {
       scanner.pulse();
       const request = sent.at(-1);
-      const digits = Array.from({ length: 1000 }, (_, i) => i % 2 ? 7 : 2);
-      if (index === 0) for (let i = 0; i < 100; i++) digits[i * 10] = 4;
+      const digits = Array.from({ length: 1000 }, (_, i) => index === 0 ? (i % 5 ? 2 : 7) : (i % 5 ? 7 : 2));
       scanner.handle({ req_id: request.req_id, subscription: { id: `sub${index}` }, pip_size: 3,
         history: { prices: prices(digits), times: digits.map((_, i) => now / 1000 - (999 - i)) } });
     }
   }
   const quotes = () => sent.filter((request) => request.proposal === 1).slice(-2);
   const buys = () => sent.filter((request) => request.buy);
-  const replyQuote = (request, payout = 1.3) => scanner.handle({ req_id: request.req_id, proposal: { id: `quote${request.req_id}`, ask_price: 0.5, payout } });
+  const replyQuote = (request, payout = 0.95) => scanner.handle({ req_id: request.req_id, proposal: { id: `quote${request.req_id}`, ask_price: 0.5, payout } });
   return { scanner, sent, pending, halts, statuses, initialize, quotes, buys, replyQuote, signalCount: () => signals,
     advance: (ms) => { now += ms; scanner.pulse(); }, setAllowed: (value) => { allow = value; } };
 }
 
-test("strict barriers: 4 and 5 are in neither winning set, precision retains zero", () => {
+test("Under 5 includes 4; Over 4 includes 5; precision retains zero", () => {
   const result = analyzePairDigits(prices(Array.from({ length: 1000 }, (_, i) => i % 10)), 3);
-  assert.equal(result.over, 0.4); assert.equal(result.under, 0.4);
-  assert.ok(Math.abs(result.middle - 0.2) < 1e-12);
+  assert.equal(result.over, 0.5); assert.equal(result.under, 0.5);
+  assert.equal(analyzePairDigits(prices([4]), 3).under, 1);
+  assert.equal(analyzePairDigits(prices([5]), 3).over, 1);
+  assert.equal(analyzePairDigits([100.000], 3).under, 1);
   assert.equal(result.eligible, false);
   assert.equal(analyzePairDigits(prices(Array(99).fill(7)), 3).eligible, false);
   assert.equal(analyzePairDigits([Infinity], 3).eligible, false);
@@ -62,18 +68,22 @@ test("discovers new volatility indices and excludes suspended/non-volatility sym
     { symbol: "R_100", is_trading_suspended: 1 },
   ]);
   assert.deepEqual(Array.from(result, (s) => [s.symbol, s.pipSize]), [["1HZ15V", 2], ["R_25", 3]]);
-  assert.equal(supportsPair(contracts), true);
-  assert.equal(supportsPair(contracts.slice(0, 1)), false);
-  assert.equal(supportsPair(contracts.map((c) => ({ ...c, min_contract_duration: "5t" }))), false);
+  assert.equal(supportsPairLeg(contracts, "DIGITUNDER"), true);
+  assert.equal(supportsPairLeg(contracts.slice(0, 1), "DIGITUNDER"), false);
+  assert.equal(supportsPairLeg(contracts.map((c) => ({ ...c, min_contract_duration: "5t" })), "DIGITOVER"), false);
+  assert.equal(supportsPairLeg([{ ...contracts[0], last_digit_range: [5] }], "DIGITOVER"), false);
+  assert.equal(supportsPairLeg([{ ...contracts[0], last_digit_range: [4] }], "DIGITOVER"), true);
+  assert.equal(supportsPairLeg([{ ...contracts[1], last_digit_range: [5] }], "DIGITUNDER"), true);
 });
 
 test("ranks independent streams and sends exactly two buys only after both quotes", () => {
   const h = harness(); h.initialize();
   assert.equal(h.scanner.rows()[0].symbol, "1HZ15V");
   h.scanner.requestBestPair(0.5, "USD");
-  const [over, under] = h.quotes();
-  assert.deepEqual([over.contract_type, over.barrier, under.contract_type, under.barrier], ["DIGITOVER", 5, "DIGITUNDER", 4]);
-  assert.equal(over.underlying_symbol, under.underlying_symbol);
+  const [under, over] = h.quotes();
+  assert.deepEqual([under.contract_type, under.barrier, over.contract_type, over.barrier], ["DIGITUNDER", 5, "DIGITOVER", 4]);
+  assert.notEqual(over.underlying_symbol, under.underlying_symbol);
+  assert.equal(under.underlying_symbol, "R_25");
   assert.equal(over.underlying_symbol, "1HZ15V");
   h.replyQuote(under); assert.equal(h.buys().length, 0);
   h.replyQuote(over); assert.equal(h.buys().length, 2);
@@ -98,8 +108,8 @@ test("a failed quote, Stop, stale data or changed budget cannot send half a pair
 test("insufficient funds and invalid or negative-EV quotes are rejected", () => {
   const h = harness({ funds: 0.75 }); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
   assert.equal(h.quotes().length, 0);
-  const analysis = analyzePairDigits(prices(Array.from({ length: 1000 }, (_, i) => i % 2 ? 7 : 2)), 3);
-  assert.equal(evaluatePairQuotes(analysis, [{ ask: 0.5, payout: 0.7 }, { ask: 0.5, payout: 0.7 }], 0.5).accepted, false);
+  const analysis = [row("R_25", "under", 0.8), row("1HZ15V", "over", 0.8)];
+  assert.equal(evaluatePairQuotes(analysis, [{ ask: 0.5, payout: 0.6 }, { ask: 0.5, payout: 0.6 }], 0.5).accepted, false);
   assert.equal(evaluatePairQuotes(analysis, [{ ask: 0.6, payout: 2 }, { ask: 0.5, payout: 2 }], 0.5).accepted, false);
 });
 
@@ -140,23 +150,25 @@ test("stream correlation survives missing echo and duplicate/out-of-order ticks"
 });
 
 test("rejects a positive point estimate when uncertainty or combined costs erase the edge", () => {
-  const digits = Array.from({ length: 1000 }, (_, i) => i % 2 ? 7 : 2);
-  for (let i = 0; i < 100; i++) digits[i * 10] = 4;
-  const analysis = analyzePairDigits(prices(digits), 3);
-  const quotes = [{ ask: 2, payout: 4.85 }, { ask: 2, payout: 4.85 }];
-  const result = evaluatePairQuotes(analysis, quotes, 2, 13);
-  assert.equal(analysis.eligible, true);
+  const analysis = [row("R_25", "under", 0.55), row("1HZ15V", "over", 0.55)];
+  const quotes = [{ ask: 0.5, payout: 0.95 }, { ask: 0.5, payout: 0.95 }];
+  const result = evaluatePairQuotes(analysis, quotes, 0.5, 13);
+  assert.equal(analysis[0].underEligible, true);
   assert.ok(result.expectedValue > 0);
   assert.ok(result.conservativeExpectedValue < 0);
   assert.equal(result.accepted, false);
-  assert.ok(result.conservativeExpectedValue < evaluatePairQuotes(analysis, quotes, 2, 1).conservativeExpectedValue);
-  assert.equal(evaluatePairQuotes(analysis, [{ ask: 2, payout: 3.9 }, { ask: 2, payout: 20 }], 2).accepted, false);
-  assert.equal(analyzePairDigits(prices(digits.slice(-499)), 3).eligible, false);
+  assert.ok(result.conservativeExpectedValue < evaluatePairQuotes(analysis, quotes, 0.5, 1).conservativeExpectedValue);
+  const strong = [row("R_25", "under", 0.8), row("1HZ15V", "over", 0.8)];
+  assert.equal(evaluatePairQuotes(strong, quotes, 0.5).accepted, true, "one payout need not cover two stakes");
+  assert.equal(evaluatePairQuotes(strong, [{ ask: 0.5, payout: 0.6 }, { ask: 0.5, payout: 2 }], 0.5).accepted, false, "reject a losing leg despite profitable partner");
+  assert.equal(analyzePairDigits(prices(Array(499).fill(4)), 3).eligible, false);
 });
 
 function settlePair(h, profits) {
+  const before = h.buys().length;
   h.scanner.requestBestPair(0.5, "USD");
   h.quotes().forEach((q) => h.replyQuote(q));
+  assert.equal(h.buys().length, before + 2);
   const buys = h.buys().slice(-2);
   assert.equal(buys.length, 2);
   const ids = buys.map((buy) => 1000 + buy.req_id);
@@ -167,12 +179,12 @@ function settlePair(h, profits) {
   return messages;
 }
 
-function freshen(h) {
-  h.advance(4000);
+function freshen(h, ms = 4000) {
+  h.advance(ms);
   for (const [index, symbol] of ["R_25", "1HZ15V"].entries()) {
     const market = h.scanner.markets.get(symbol);
     const latest = Math.max(...market.points.keys());
-    h.scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: latest + 4, quote: 100.007, pip_size: 3 } });
+    h.scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: latest + ms / 1000, quote: 100.007, pip_size: 3 } });
   }
 }
 
@@ -196,9 +208,10 @@ test("two net losses pause an index; three across indices halt the session", () 
   freshen(h); settlePair(h, [-0.5, -0.5]);
   assert.equal(h.scanner.active, true);
   assert.equal(h.scanner.rows().find((row) => row.symbol === "1HZ15V").status, "Pause indice");
-  freshen(h); settlePair(h, [-0.5, -0.5]);
+  freshen(h, 61000); settlePair(h, [-0.5, -0.5]);
   const result = h.scanner.results();
-  assert.equal(result.trades[0].symbol, "R_25");
+  assert.equal(result.trades[0].legs[0].symbol, "R_25");
+  assert.equal(result.trades[0].legs[1].symbol, "1HZ15V");
   assert.equal(result.stats.netProfit, -3);
   assert.equal(result.stats.consecutiveLosses, 3);
   assert.equal(h.scanner.active, false);
@@ -236,4 +249,60 @@ test("missing settlement profit halts and cannot be counted as zero or a win", (
   assert.equal(h.scanner.busy, true);
   assert.equal(h.scanner.results().stats.completed, 0);
   assert.match(h.halts.at(-1), /Résultat net/);
+});
+
+test("selects the strongest qualifying direction on distinct instruments across the scan", () => {
+  const rows = [row("R_25", "under", 0.65), row("1HZ15V", "over", 0.7), row("R_100", "under", 0.8)];
+  const selected = selectPairMarkets(rows);
+  assert.deepEqual(Array.from(selected, (r) => r.symbol), ["R_100", "1HZ15V"]);
+  assert.equal(selectPairMarkets(rows.filter((r) => r.symbol !== "1HZ15V")), null);
+  const both = { ...rows[0], overEligible: true };
+  assert.equal(selectPairMarkets([both]), null, "same instrument is never a fallback");
+  assert.equal(evaluatePairQuotes([both, both], [{ ask: 0.5, payout: 2 }, { ask: 0.5, payout: 2 }], 0.5).accepted, false);
+});
+
+test("quotes each instrument's available side, with the corrected barrier", () => {
+  const h = harness({ available: (index) => [{ contract_type: index === 0 ? "DIGITUNDER" : "DIGITOVER", min_contract_duration: "1t", last_digit_range: [index === 0 ? 5 : 4] }] });
+  h.initialize();
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.quotes().length, 2);
+  h.quotes().forEach((q) => h.replyQuote(q));
+  assert.deepEqual(h.pending.map((p) => [p.leg.symbol, p.leg.contractType, p.leg.barrier]), [["R_25", "DIGITUNDER", 5], ["1HZ15V", "DIGITOVER", 4]]);
+  const legs = h.scanner.results().trades[0].legs;
+  assert.deepEqual(Array.from(legs, (leg) => leg.symbol), ["R_25", "1HZ15V"]);
+});
+
+test("no pair when only one instrument is eligible or one stream becomes stale", () => {
+  const one = harness(); one.initialize();
+  one.scanner.markets.delete("1HZ15V");
+  one.scanner.requestBestPair(0.5, "USD");
+  assert.equal(one.quotes().length, 0);
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
+  const [a, b] = h.quotes(); h.replyQuote(a);
+  h.scanner.markets.get("1HZ15V").updatedAt -= 6000;
+  h.replyQuote(b);
+  assert.equal(h.buys().length, 0);
+});
+
+test("rechecks both directional histories before buying, without swapping quoted instruments", () => {
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(0.5, "USD");
+  const [a, b] = h.quotes(); h.replyQuote(b);
+  const market = h.scanner.markets.get("R_25");
+  market.points = new Map([...market.points.keys()].map((epoch) => [epoch, 100.009]));
+  h.replyQuote(a);
+  assert.equal(h.buys().length, 0);
+});
+
+test("loss cooldown belongs only to the instrument that lost its own contracts", () => {
+  const h = harness(); h.initialize();
+  settlePair(h, [-0.5, 0.45]);
+  freshen(h); settlePair(h, [-0.5, 0.45]);
+  freshen(h);
+  const rows = h.scanner.rows();
+  assert.equal(rows.find((r) => r.symbol === "R_25").status, "Pause indice");
+  assert.equal(rows.find((r) => r.symbol === "1HZ15V").overEligible, true);
+  const signals = h.signalCount();
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.signalCount(), signals);
+  assert.equal(h.scanner.results().stats.consecutiveLosses, 2, "a single winning leg can still leave a losing pair");
 });

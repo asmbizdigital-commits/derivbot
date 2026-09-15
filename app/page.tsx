@@ -184,7 +184,7 @@ type DerivMode = "manual" | "auto";
 type DerivStrategy = "trend" | "momentum" | "reversal";
 type DerivHistoryPeriod = "today" | "7d" | "30d" | "all";
 type DerivAutoDigitBarrierMode = "dynamic" | "fixed";
-type DerivOverUnderStrategy = "under8_transition" | "over2" | "over5" | "under5" | "over5_under4_all";
+type DerivOverUnderStrategy = "under8_transition" | "over2" | "over5" | "under5" | "under5_over4_cross";
 type EaStrategyPreset = "smc_ai" | "trend_breakout" | "scalping" | "conservative";
 type EaTimeframe = "M5" | "M15" | "H1";
 type CopyTradingProvider = "mt5_master" | "deriv_signal" | "manual_leader";
@@ -246,7 +246,7 @@ const derivStrategies: Record<DerivStrategy, { name: string; description: string
 };
 
 const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; description: string; contractType: "DIGITOVER" | "DIGITUNDER"; barrier: number }> = {
-  over5_under4_all: { name: "Over 5 + Under 4", description: "Analyse les fréquences sur tous les indices de volatilité disponibles ; une paire sur le meilleur indice qualifié.", contractType: "DIGITOVER", barrier: 5 },
+  under5_over4_cross: { name: "Under 5 + Over 4", description: "Analyse les fréquences sur tous les indices de volatilité disponibles ; Under 5 et Over 4 sur deux indices distincts qualifiés.", contractType: "DIGITUNDER", barrier: 5 },
   under8_transition: { name: "Under 8", description: "Attend un digit 9, puis entre Under 8 dès que le flux passe à un autre digit.", contractType: "DIGITUNDER", barrier: 8 },
   over2: { name: "Over 2", description: "Entre Over 2 quand les derniers chiffres favorisent 3 à 9.", contractType: "DIGITOVER", barrier: 2 },
   over5: { name: "Over 5", description: "Attend un digit 4, puis entre Over 5 dès que le flux passe à un autre digit.", contractType: "DIGITOVER", barrier: 5 },
@@ -254,7 +254,7 @@ const derivOverUnderStrategies: Record<DerivOverUnderStrategy, { name: string; d
 };
 
 function getOverUnderStrategySummary(strategy: DerivOverUnderStrategy) {
-  if (strategy === "over5_under4_all") return "Paire simultanée · scan toutes volatilités";
+  if (strategy === "under5_over4_cross") return "Under 5 + Over 4 · deux indices distincts";
   const config = derivOverUnderStrategies[strategy];
   if (strategy === "under8_transition") return "Déclenche après 9 -> autre digit";
   if (strategy === "over5") return "Déclenche après 4 -> autre digit";
@@ -555,7 +555,7 @@ function getDigitExitTransitionState(ticks: number[], triggerDigit: number, pipS
   };
 }
 
-function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOverUnderStrategy, "under8_transition" | "over5" | "over5_under4_all">, pipSize = 3): DerivDigitAutoSignal | null {
+function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOverUnderStrategy, "under8_transition" | "over5" | "under5_over4_cross">, pipSize = 3): DerivDigitAutoSignal | null {
   if (ticks.length < 50) return null;
   const strategyConfig = derivOverUnderStrategies[strategy];
   const shortStats = getDigitStats(ticks, 25, pipSize);
@@ -578,7 +578,7 @@ function getFixedOverUnderAutoSignal(ticks: number[], strategy: Exclude<DerivOve
 
 function getDerivDigitAutoSignal(ticks: number[], contractType: DerivContractCode, preferredBarrier: number | null = null, pipSize = 3, overUnderStrategy: DerivOverUnderStrategy = "under8_transition", excludedMatchDigits: Set<number> = new Set(), matchRules: MatchStrategyRules = DEFAULT_MATCH_STRATEGY_RULES, completedMatchContracts = 0): DerivDigitAutoSignal | null {
   if (contractType === "DIGITOVER" || contractType === "DIGITUNDER") {
-    if (overUnderStrategy === "over5_under4_all") return null;
+    if (overUnderStrategy === "under5_over4_cross") return null;
     if (overUnderStrategy === "over5") {
       const transition = getDigitExitTransitionState(ticks, 4, pipSize);
       if (transition.state !== "triggered") return null;
@@ -1577,7 +1577,7 @@ export default function Home() {
         maybeRunDerivAuto(derivTicksRef.current, socket);
       },
       canBuy: (cost) => {
-        if (!derivAutoRunningRef.current || derivModeRef.current !== "auto" || derivOverUnderStrategyRef.current !== "over5_under4_all"
+        if (!derivAutoRunningRef.current || derivModeRef.current !== "auto" || derivOverUnderStrategyRef.current !== "under5_over4_cross"
           || !isDerivTradingStatus(derivStatusRef.current) || !derivPortfolioReadyRef.current || derivSocketRef.current !== socket
           || derivOpenContractsRef.current.size > 0 || derivPendingBuysRef.current.size > 0) return false;
         if (derivMaxSignalsRef.current > 0 && derivSessionSignalsRef.current >= derivMaxSignalsRef.current) { stopDerivAutoOnSignalLimit(); return false; }
@@ -1591,7 +1591,7 @@ export default function Home() {
     });
     derivPairScannerRef.current = scanner;
     setDerivAutoStatus("Découverte de tous les indices de volatilité disponibles…");
-    setDerivMessage("Over 5 + Under 4 · 2 mises fixes par paire · martingale et multiplicateurs ignorés pour cette stratégie");
+    setDerivMessage("Under 5 + Over 4 · 2 mises fixes par paire · martingale et multiplicateurs ignorés pour cette stratégie");
     scanner.start();
   }
 
@@ -1604,7 +1604,7 @@ export default function Home() {
     }
     const currentContractType = derivContractTypeRef.current;
     const currentMatchStrategy = derivMatchStrategyRef.current;
-    if ((currentContractType === "DIGITOVER" || currentContractType === "DIGITUNDER") && derivOverUnderStrategyRef.current === "over5_under4_all") {
+    if ((currentContractType === "DIGITOVER" || currentContractType === "DIGITUNDER") && derivOverUnderStrategyRef.current === "under5_over4_cross") {
       derivPairScannerRef.current?.requestBestPair(derivStakeRef.current, derivCurrencyRef.current);
       return;
     }
@@ -1834,7 +1834,7 @@ export default function Home() {
 
   function changeDerivOverUnderStrategy(nextStrategy: DerivOverUnderStrategy) {
     stopDerivAuto();
-    if (nextStrategy === "over5_under4_all") { derivModeRef.current = "auto"; setDerivMode("auto"); }
+    if (nextStrategy === "under5_over4_cross") { derivModeRef.current = "auto"; setDerivMode("auto"); }
     const strategy = derivOverUnderStrategies[nextStrategy];
     derivOverUnderStrategyRef.current = nextStrategy;
     derivContractTypeRef.current = strategy.contractType;
@@ -1941,7 +1941,7 @@ export default function Home() {
       setDerivMessage("Le mode automatique exige un compte Options connecté");
       return;
     }
-    if (derivOverUnderStrategyRef.current === "over5_under4_all" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) {
+    if (derivOverUnderStrategyRef.current === "under5_over4_cross" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) {
       startDerivPair(socket);
       return;
     }
@@ -2066,7 +2066,7 @@ export default function Home() {
   }
 
   function requestDerivProposal() {
-    if (derivOverUnderStrategyRef.current === "over5_under4_all" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) { setDerivMessage("La paire Over 5 + Under 4 se lance en Full automatique avec Play."); return; }
+    if (derivOverUnderStrategyRef.current === "under5_over4_cross" && (derivContractTypeRef.current === "DIGITOVER" || derivContractTypeRef.current === "DIGITUNDER")) { setDerivMessage("La paire Under 5 + Over 4 se lance en Full automatique avec Play."); return; }
     const socket = derivSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setDerivMessage("Connectez d’abord le flux Deriv");
@@ -2232,7 +2232,7 @@ export default function Home() {
 	      const selectedContractCategory = derivContractCategories[derivContractCategory];
 	      const selectedContractBarrierOptions = getDigitBarrierOptions(derivContractType);
 	      const derivMartingalePercent = Math.round((derivMartingaleMultiplier - 1) * 100);
-	      const isPairedOverUnder = derivOverUnderStrategy === "over5_under4_all" && (derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER");
+	      const isPairedOverUnder = derivOverUnderStrategy === "under5_over4_cross" && (derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER");
 	      const isOverUnderCategory = derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER";
 	      const martingaleCycleLabel = derivConsecutiveLosses > derivOverUnderMartingaleCycles ? "Cycle terminé" : `${Math.max(0, derivConsecutiveLosses)}/${derivOverUnderMartingaleCycles}`;
 	      return <section className="view-stack">
