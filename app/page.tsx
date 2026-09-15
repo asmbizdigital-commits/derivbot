@@ -9,7 +9,7 @@ import { MatchPredictionBalloon } from "@/components/match-prediction-balloon";
 import { evaluateOverUnderQuote, getUnderEightTransitionState, type OverUnderCandidate } from "@/lib/over-under-prediction";
 import { buildRiseFallSignal, evaluateRiseFallQuote, type RiseFallSignal } from "@/lib/rise-fall-prediction";
 import { OverUnderPairPanel } from "@/components/over-under-pair-panel";
-import { OverUnderPairScanner, EMPTY_PAIR_STATS, type PairRow, type PairTrade, type PairStats } from "@/lib/over-under-pair";
+import { OverUnderPairScanner, EMPTY_PAIR_STATS, pairBudgetAllows, type PairRow, type PairTrade, type PairStats } from "@/lib/over-under-pair";
 import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, evaluateMatchQuote, isFastMatchMode, type MatchCandidate, type MatchStrategyRules } from "@/lib/match-prediction";
 import { DERIV_MARKETS, DERIV_MARKET_PIP_SIZES, isDerivMarketSymbol, type DerivMarketSymbol } from "@/lib/deriv-markets";
 
@@ -847,8 +847,8 @@ export default function Home() {
 		  const derivAutoDigitBarrierModeRef = useRef<DerivAutoDigitBarrierMode>("dynamic");
 		  const derivAutoQuoteRef = useRef<Map<number, DerivAutoQuote>>(new Map());
   const derivPairScannerRef = useRef<OverUnderPairScanner | null>(null);
-  const derivPairStopLossRef = useRef(4);
-  const [derivPairStopLoss, setDerivPairStopLoss] = useState(4);
+  const derivPairStopLossRef = useRef(0);
+  const [derivPairStopLoss, setDerivPairStopLoss] = useState(0);
   const [derivPairRows, setDerivPairRows] = useState<PairRow[]>([]);
   const [derivPairTrades, setDerivPairTrades] = useState<PairTrade[]>([]);
   const [derivPairStats, setDerivPairStats] = useState<PairStats>({ ...EMPTY_PAIR_STATS });
@@ -1543,8 +1543,8 @@ export default function Home() {
     }
     const stake = derivStakeRef.current;
     const stopLoss = derivPairStopLossRef.current;
-    if (!Number.isFinite(stake) || stake < 0.35 || !Number.isFinite(stopLoss) || stopLoss < 2 * stake || derivBalanceRef.current === null || derivBalanceRef.current < 2 * stake) {
-      setDerivAutoStatus("La mise totale de la paire doit tenir dans la balance et le budget de perte de session.");
+    if (!Number.isFinite(stake) || stake < 0.35 || !pairBudgetAllows(2 * stake, 0, stopLoss) || derivBalanceRef.current === null || derivBalanceRef.current < 2 * stake) {
+      setDerivAutoStatus("La mise totale doit tenir dans la balance et, s’il est activé, le budget de session (0 = désactivé).");
       return;
     }
     derivPairScannerRef.current?.dispose();
@@ -1582,7 +1582,7 @@ export default function Home() {
           || derivOpenContractsRef.current.size > 0 || derivPendingBuysRef.current.size > 0) return false;
         if (derivMaxSignalsRef.current > 0 && derivSessionSignalsRef.current >= derivMaxSignalsRef.current) { stopDerivAutoOnSignalLimit(); return false; }
         if (derivBalanceRef.current === null || derivBalanceRef.current < cost) { stopDerivAutoOnPnlLimit("Balance insuffisante pour les deux contrats"); return false; }
-        if (derivSessionPnlRef.current - cost < -derivPairStopLossRef.current - 1e-8) { stopDerivAutoOnPnlLimit("Budget de perte insuffisant pour engager une nouvelle paire"); return false; }
+        if (!pairBudgetAllows(cost, derivSessionPnlRef.current, derivPairStopLossRef.current)) { stopDerivAutoOnPnlLimit("Budget de perte insuffisant pour engager une nouvelle paire"); return false; }
         return true;
       },
       onBuyRequest: (id, leg) => { derivPendingBuysRef.current.set(id, leg); },

@@ -17,8 +17,8 @@ Les deux achats ne forment pas une opération atomique : leurs heures d’exécu
 
 1. Découvrir tous les indices de volatilité disponibles avec `active_symbols`, hors marchés fermés ou suspendus.
 2. Vérifier séparément `contracts_for` : DIGITUNDER barrière 5 pour un candidat Under ; DIGITOVER barrière 4 pour un candidat Over. La durée de 1 tick doit être disponible. Un marché qui propose un seul des deux côtés peut être sélectionné pour ce côté.
-3. Charger jusqu’à 1 000 ticks par indice, avec au moins 500 ticks avant qualification. Utiliser la précision de l’API ; conserver les zéros finaux, trier et dédupliquer par timestamp. Écarter un flux âgé de plus de 5 secondes.
-4. Pour Under, compter les chiffres **0–4** de cet indice ; pour Over, compter **5–9**. Chaque côté exige au moins 55 % sur la fenêtre principale, 54 % sur les 200 derniers ticks et 52 % sur les 50 derniers ticks.
+3. Charger jusqu’à 200 ticks par indice, avec 200 ticks avant qualification. Utiliser la précision de l’API ; conserver les zéros finaux, trier et dédupliquer par timestamp. Écarter un flux âgé de plus de 5 secondes.
+4. Pour Under, compter les chiffres **0–4** de cet indice ; pour Over, compter **5–9**. Chaque côté exige au moins 55 % sur les 200 derniers ticks et 52 % sur les 50 derniers ticks.
 5. Comparer les combinaisons ordonnées Under/Over admissibles, avec symboles différents. Sélectionner la plus grande somme des deux fréquences prudentes définies ci-dessous ; départager les égalités par symbole. Le choix est effectué avant cotations, sans prétendre comparer les payouts de toutes les combinaisons.
 
 L’indice du graphique reste un réglage d’affichage indépendant. Le tableau de scan indique les fréquences Under et Over de chaque indice. Le journal des paires affiche le symbole propre à chaque contrat.
@@ -38,7 +38,7 @@ Le filtre n’exige plus qu’un seul payout couvre les deux mises : cette condi
 ## Mise et protections
 
 - Régler la mise fixe **par contrat** : deux fois cette mise est engagée par signal. Martingale, double risque et demi-solde sont ignorés pour cette stratégie.
-- Régler le budget de perte de session. La perte maximale de la prochaine paire doit tenir dans ce budget et dans la balance disponible.
+- Le budget monétaire de session est **désactivé par défaut (0)** : aucun plafond fixe de 2 par contrat. La mise saisie est utilisée sans réduction ; le coût des deux contrats doit tenir dans la balance. Un budget positif reste facultatif : si activé, la perte maximale de la prochaine paire doit aussi tenir dans ce budget. Les pauses après pertes et la protection du pic restent actives.
 - Après **2 contrats perdants consécutifs sur un même instrument**, exclure cet instrument pendant 60 secondes. Une perte n’est pas attribuée à son partenaire. Une pause limite l’exposition et ne rend pas les chiffres suivants plus prévisibles.
 - Après **3 paires déficitaires consécutives**, tous instruments confondus, arrêter les entrées. Le résultat d’une paire est la somme des profits nets réellement reçus pour ses deux contrats.
 - Dès que le pic de bénéfice atteint le coût de deux paires, refuser une entrée dont la perte maximale ramènerait le résultat sous 50 % de ce pic.

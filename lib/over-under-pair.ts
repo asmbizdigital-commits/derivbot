@@ -13,6 +13,12 @@ export type PairTrade = {
 export type PairStats = { completed: number; profitable: number; losing: number; netProfit: number; peakProfit: number; consecutiveLosses: number };
 export const EMPTY_PAIR_STATS: PairStats = { completed: 0, profitable: 0, losing: 0, netProfit: 0, peakProfit: 0, consecutiveLosses: 0 };
 
+// Zero disables the optional monetary session limit; balance is checked separately.
+export function pairBudgetAllows(cost: number, sessionPnl: number, budget: number) {
+  return Number.isFinite(cost) && cost > 0 && Number.isFinite(sessionPnl) && Number.isFinite(budget) && budget >= 0
+    && (budget === 0 || sessionPnl - cost >= -budget - 1e-8);
+}
+
 export function pairProfitProtection(stats: PairStats, nextCost: number) {
   // Reserve the full possible loss BEFORE re-entry, after profits reach two pairs.
   return stats.peakProfit >= 2 * nextCost && stats.netProfit - nextCost < stats.peakProfit * 0.5 - 1e-8;
@@ -33,15 +39,14 @@ export const PAIR_SIDES = [
 export function analyzePairDigits(prices: number[], pipSize: number | null): PairAnalysis {
   const empty = { sampleSize: 0, over: 0, under: 0, overEstimate: 0.5, underEstimate: 0.5, underEligible: false, overEligible: false, eligible: false };
   if (pipSize === null || !Number.isInteger(pipSize) || pipSize < 0 || pipSize > 12) return empty;
-  const sample = prices.slice(-1000);
+  const sample = prices.slice(-200);
   if (!sample.length || sample.some((price) => !Number.isFinite(price) || Math.abs(price) >= 1e21)) return empty;
   const digits = sample.map((price) => Number(price.toFixed(pipSize).at(-1)));
   const underCount = digits.filter((digit) => digit < 5).length;
   const overCount = digits.length - underCount;
   const under = underCount / digits.length;
   const over = overCount / digits.length;
-  const qualifies = (wins: (digit: number) => boolean, frequency: number) => digits.length >= 500 && frequency >= 0.55
-    && digits.slice(-200).filter(wins).length / 200 >= 0.54
+  const qualifies = (wins: (digit: number) => boolean, frequency: number) => digits.length >= 200 && frequency >= 0.55
     && digits.slice(-50).filter(wins).length / 50 >= 0.52;
   const underEligible = qualifies((digit) => digit < 5, under);
   const overEligible = qualifies((digit) => digit > 4, over);
@@ -235,7 +240,7 @@ export class OverUnderPairScanner {
       const underEligible = available && market.supportsUnder && analysis.underEligible;
       const overEligible = available && market.supportsOver && analysis.overEligible;
       return { ...analysis, underEligible, overEligible, eligible: underEligible || overEligible, symbol: market.symbol, name: market.name, fresh,
-        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 500 ? "Collecte (500 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
+        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 200 ? "Collecte (200 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
     }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || Math.max(b.over, b.under) - Math.max(a.over, a.under) || a.symbol.localeCompare(b.symbol));
   }
 
@@ -405,7 +410,7 @@ export class OverUnderPairScanner {
       market.supportsOver = supportsPairLeg(message.contracts_for.available, "DIGITOVER");
       const supported = market.supportsUnder || market.supportsOver;
       market.status = supported ? "Collecte" : "Contrats 1 tick indisponibles";
-      if (supported) this.enqueue({ ticks_history: market.symbol, count: 1000, end: "latest", style: "ticks", subscribe: 1 }, { kind: "history", symbol: market.symbol });
+      if (supported) this.enqueue({ ticks_history: market.symbol, count: 200, end: "latest", style: "ticks", subscribe: 1 }, { kind: "history", symbol: market.symbol });
     }
     const historySymbol = this.historySymbols.get(id);
     const market = historySymbol ? this.markets.get(historySymbol) : undefined;
@@ -432,7 +437,7 @@ export class OverUnderPairScanner {
   private addPoint(market: PairMarket, epoch: number, price: number) {
     if (!Number.isFinite(epoch) || !Number.isFinite(price) || Math.abs(price) >= 1e21) return;
     market.points.set(epoch, price);
-    market.points = new Map([...market.points].sort((a, b) => a[0] - b[0]).slice(-1000));
+    market.points = new Map([...market.points].sort((a, b) => a[0] - b[0]).slice(-200));
     const latest = [...market.points.keys()].at(-1)! * 1000;
     // Epoch freshness prevents delayed history and repeated old ticks refreshing a market.
     market.updatedAt = latest <= this.now() + 2000 ? Math.min(latest, this.now()) : 0;

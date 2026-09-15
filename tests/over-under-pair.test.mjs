@@ -6,13 +6,13 @@ import ts from "typescript";
 
 const source = readFileSync(new URL("../lib/over-under-pair.ts", import.meta.url), "utf8").replaceAll("export ", "");
 const context = vm.createContext({ setInterval: () => 1, clearInterval() {} });
-vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
-const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, EMPTY_PAIR_STATS } = context.api;
+vm.runInContext(ts.transpileModule(source + "\nglobalThis.api = { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBudgetAllows, EMPTY_PAIR_STATS };", { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
+const { OverUnderPairScanner, analyzePairDigits, volatilitySymbols, supportsPairLeg, selectPairMarkets, evaluatePairQuotes, pairProfitProtection, pairBudgetAllows, EMPTY_PAIR_STATS } = context.api;
 const prices = (digits) => digits.map((digit) => 100 + digit / 1000);
 const contracts = ["DIGITOVER", "DIGITUNDER"].map((contract_type) => ({ contract_type, min_contract_duration: "1t", max_contract_duration: "10t" }));
 
 function row(symbol, side, frequency) {
-  const digits = Array.from({ length: 1000 }, (_, i) => ((i * 37) % 100 < Math.round(frequency * 100)) === (side === "under") ? 4 : 5);
+  const digits = Array.from({ length: 200 }, (_, i) => ((i * 37) % 100 < Math.round(frequency * 100)) === (side === "under") ? 4 : 5);
   return { ...analyzePairDigits(prices(digits), 3), symbol, name: symbol, fresh: true, status: "Actif" };
 }
 
@@ -35,9 +35,9 @@ function harness({ funds = 100, allow = true, available = () => contracts } = {}
     for (let index = 0; index < 2; index++) {
       scanner.pulse();
       const request = sent.at(-1);
-      const digits = Array.from({ length: 1000 }, (_, i) => index === 0 ? (i % 5 ? 2 : 7) : (i % 5 ? 7 : 2));
+      const digits = Array.from({ length: 200 }, (_, i) => index === 0 ? (i % 5 ? 2 : 7) : (i % 5 ? 7 : 2));
       scanner.handle({ req_id: request.req_id, subscription: { id: `sub${index}` }, pip_size: 3,
-        history: { prices: prices(digits), times: digits.map((_, i) => now / 1000 - (999 - i)) } });
+        history: { prices: prices(digits), times: digits.map((_, i) => now / 1000 - (199 - i)) } });
     }
   }
   const quotes = () => sent.filter((request) => request.proposal === 1).slice(-2);
@@ -48,7 +48,7 @@ function harness({ funds = 100, allow = true, available = () => contracts } = {}
 }
 
 test("Under 5 includes 4; Over 4 includes 5; precision retains zero", () => {
-  const result = analyzePairDigits(prices(Array.from({ length: 1000 }, (_, i) => i % 10)), 3);
+  const result = analyzePairDigits(prices(Array.from({ length: 200 }, (_, i) => i % 10)), 3);
   assert.equal(result.over, 0.5); assert.equal(result.under, 0.5);
   assert.equal(analyzePairDigits(prices([4]), 3).under, 1);
   assert.equal(analyzePairDigits(prices([5]), 3).over, 1);
@@ -161,7 +161,7 @@ test("rejects a positive point estimate when uncertainty or combined costs erase
   const strong = [row("R_25", "under", 0.8), row("1HZ15V", "over", 0.8)];
   assert.equal(evaluatePairQuotes(strong, quotes, 0.5).accepted, true, "one payout need not cover two stakes");
   assert.equal(evaluatePairQuotes(strong, [{ ask: 0.5, payout: 0.6 }, { ask: 0.5, payout: 2 }], 0.5).accepted, false, "reject a losing leg despite profitable partner");
-  assert.equal(analyzePairDigits(prices(Array(499).fill(4)), 3).eligible, false);
+  assert.equal(analyzePairDigits(prices(Array(199).fill(4)), 3).eligible, false);
 });
 
 function settlePair(h, profits) {
@@ -305,4 +305,40 @@ test("loss cooldown belongs only to the instrument that lost its own contracts",
   h.scanner.requestBestPair(0.5, "USD");
   assert.equal(h.signalCount(), signals);
   assert.equal(h.scanner.results().stats.consecutiveLosses, 2, "a single winning leg can still leave a losing pair");
+});
+
+test("requests and retains 200 ticks, qualifying at 200 rather than 500", () => {
+  const h = harness(); h.initialize();
+  assert.ok(h.sent.filter((request) => request.ticks_history).every((request) => request.count === 200));
+  assert.equal(analyzePairDigits(prices(Array(199).fill(4)), 3).eligible, false);
+  assert.equal(analyzePairDigits(prices(Array(200).fill(4)), 3).underEligible, true);
+  const recent = analyzePairDigits(prices([...Array(800).fill(9), ...Array(200).fill(4)]), 3);
+  assert.equal(recent.sampleSize, 200);
+  assert.equal(recent.under, 1);
+  h.scanner.handle({ subscription: { id: "sub0" }, tick: { symbol: "R_25", epoch: 1_800_000_001, quote: 100.004, pip_size: 3 } });
+  assert.equal(h.scanner.markets.get("R_25").points.size, 200);
+});
+
+test("zero disables the monetary budget while explicit limits and invalid inputs remain enforced", () => {
+  assert.equal(pairBudgetAllows(6, 0, 0), true);
+  assert.equal(pairBudgetAllows(6, -30, 0), true);
+  assert.equal(pairBudgetAllows(6, 0, 4), false);
+  assert.equal(pairBudgetAllows(6, 2, 4), true);
+  assert.equal(pairBudgetAllows(6, 1.99, 4), false);
+  for (const invalid of [-1, NaN, Infinity]) assert.equal(pairBudgetAllows(6, 0, invalid), false);
+  assert.equal(pairBudgetAllows(Infinity, 0, 0), false);
+  assert.equal(pairBudgetAllows(0, 0, 0), false);
+});
+
+test("a user stake above 2 is quoted and bought unchanged when funds permit", () => {
+  const h = harness(); h.initialize(); h.scanner.requestBestPair(3, "USD");
+  assert.equal(h.quotes().length, 2);
+  h.quotes().forEach((q) => {
+    assert.equal(q.amount, 3);
+    h.scanner.handle({ req_id: q.req_id, proposal: { id: `high${q.req_id}`, ask_price: 3, payout: 5.7 } });
+  });
+  assert.deepEqual(h.buys().map((buy) => buy.price), [3, 3]);
+  assert.deepEqual(h.pending.map((pending) => pending.leg.stake), [3, 3]);
+  const lowFunds = harness({ funds: 5 }); lowFunds.initialize(); lowFunds.scanner.requestBestPair(3, "USD");
+  assert.equal(lowFunds.quotes().length, 0);
 });
