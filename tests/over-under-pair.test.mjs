@@ -16,10 +16,11 @@ function row(symbol, side, frequency) {
   return { ...analyzePairDigits(prices(digits), 3), symbol, name: symbol, fresh: true, status: "Actif" };
 }
 
-function harness({ funds = 100, allow = true, available = () => contracts, withTransitions = true } = {}) {
+function harness({ funds = 100, allow = true, available = () => contracts, withTransitions = true, mode = "under5_over4", symbols = ["R_25", "1HZ15V"] } = {}) {
   let now = 1_800_000_000_000, seq = 0, signals = 0;
   const sent = [], pending = [], halts = [], statuses = [];
   const scanner = new OverUnderPairScanner({
+    mode,
     now: () => now, nextId: () => ++seq, send: (request) => sent.push(request),
     onUpdate() {}, onStatus: (message) => statuses.push(message), onHalt: (message) => halts.push(message),
     canBuy: (cost) => allow && cost <= funds,
@@ -27,12 +28,12 @@ function harness({ funds = 100, allow = true, available = () => contracts, withT
   });
   function initialize() {
     scanner.start();
-    scanner.handle({ req_id: sent[0].req_id, active_symbols: ["R_25", "1HZ15V"].map((underlying_symbol) => ({ underlying_symbol, underlying_symbol_name: `Volatility ${underlying_symbol}`, pip_size: 0.001 })) });
-    for (let index = 0; index < 2; index++) {
+    scanner.handle({ req_id: sent[0].req_id, active_symbols: symbols.map((underlying_symbol) => ({ underlying_symbol, underlying_symbol_name: `Volatility ${underlying_symbol}`, pip_size: 0.001 })) });
+    for (let index = 0; index < symbols.length; index++) {
       scanner.pulse();
       scanner.handle({ req_id: sent.at(-1).req_id, contracts_for: { available: available(index) } });
     }
-    for (let index = 0; index < 2; index++) {
+    for (let index = 0; index < symbols.length; index++) {
       scanner.pulse();
       const request = sent.at(-1);
       const digits = Array.from({ length: 200 }, (_, i) => index === 0 ? (i % 5 ? 2 : 7) : (i % 5 ? 7 : 2));
@@ -41,16 +42,16 @@ function harness({ funds = 100, allow = true, available = () => contracts, withT
     }
     if (withTransitions) {
       now += 1000;
-      ["R_25", "1HZ15V"].forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: index === 0 ? 100.007 : 100.002, pip_size: 3 } }));
+      symbols.forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: mode === "under8_digit9" ? 100.009 : index === 0 ? 100.007 : 100.002, pip_size: 3 } }));
       now += 1000;
-      ["R_25", "1HZ15V"].forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: index === 0 ? 100.003 : 100.008, pip_size: 3 } }));
+      symbols.forEach((symbol, index) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol, epoch: now / 1000, quote: index === 0 ? 100.003 : 100.008, pip_size: 3 } }));
     }
   }
   const quotes = () => sent.filter((request) => request.proposal === 1).slice(-2);
   const buys = () => sent.filter((request) => request.buy);
   const replyQuote = (request, payout = 0.95) => scanner.handle({ req_id: request.req_id, proposal: { id: `quote${request.req_id}`, ask_price: 0.5, payout } });
   return { scanner, sent, pending, halts, statuses, initialize, quotes, buys, replyQuote, signalCount: () => signals,
-    tick: (index, digit, epoch = now / 1000) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol: index === 0 ? "R_25" : "1HZ15V", epoch, quote: 100 + digit / 1000, pip_size: 3 } }),
+    tick: (index, digit, epoch = now / 1000) => scanner.handle({ subscription: { id: `sub${index}` }, tick: { symbol: symbols[index], epoch, quote: 100 + digit / 1000, pip_size: 3 } }),
     now: () => now,
     advance: (ms) => { now += ms; scanner.pulse(); }, setAllowed: (value) => { allow = value; } };
 }
@@ -447,4 +448,89 @@ test("a zone exit with a future timestamp invalidates the previous trigger", () 
   h.tick(0, 9, h.now() / 1000 + 1);
   h.replyQuote(over);
   assert.equal(h.buys().length, 0);
+});
+
+test("Under 8 counts 0–7 only and verifies the actual barrier on each market", () => {
+  const sample = analyzePairDigits(prices(Array.from({ length: 10 }, (_, i) => i)), 3, "under8_digit9");
+  assert.equal(sample.under, 0.8);
+  assert.equal(sample.over, 0.2);
+  assert.equal(sample.underEligible, true);
+  assert.equal(sample.overEligible, false);
+  assert.equal(analyzePairDigits(prices([9]), 3, "under8_digit9").eligible, false);
+  assert.equal(supportsPairLeg([{ ...contracts[1], last_digit_range: [5] }], "DIGITUNDER", 8), false);
+  assert.equal(supportsPairLeg([{ ...contracts[1], last_digit_range: [8] }], "DIGITUNDER", 8), true);
+});
+
+test("Under 8 scans all markets and sends two distinct Under 8 buys after both quotes", () => {
+  const h = harness({ mode: "under8_digit9", symbols: ["R_25", "1HZ15V", "R_100"], available: () => [{ ...contracts[1], last_digit_range: [8] }] });
+  h.initialize();
+  assert.equal(h.scanner.rows().length, 3);
+  assert.equal(h.sent.filter((r) => r.ticks_history).length, 3);
+  h.scanner.requestBestPair(5, "USD");
+  const quotes = h.quotes();
+  assert.equal(quotes.length, 2);
+  assert.equal(new Set(quotes.map((q) => q.underlying_symbol)).size, 2);
+  assert.ok(quotes.every((q) => q.contract_type === "DIGITUNDER" && q.barrier === 8 && q.amount === 5 && q.duration === 1));
+  const reply = (q) => h.scanner.handle({ req_id: q.req_id, proposal: { id: `u8-${q.req_id}`, ask_price: 5, payout: 6.1 } });
+  reply(quotes[0]); assert.equal(h.buys().length, 0);
+  reply(quotes[1]); assert.equal(h.buys().length, 2);
+  assert.ok(h.pending.every(({ leg }) => leg.contractType === "DIGITUNDER" && leg.barrier === 8 && leg.stake === 5));
+  assert.equal(new Set(h.pending.map(({ leg }) => leg.symbol)).size, 2);
+  reply(quotes[1]); assert.equal(h.buys().length, 2);
+  assert.equal(h.signalCount(), 1);
+});
+
+test("Under 8 needs two live exits from 9; 9 to 8 remains a valid trigger", () => {
+  const h = harness({ mode: "under8_digit9", withTransitions: false }); h.initialize();
+  h.scanner.requestBestPair(0.5, "USD"); assert.equal(h.quotes().length, 0);
+  h.advance(1000); h.tick(0, 9); h.tick(1, 9);
+  h.scanner.requestBestPair(0.5, "USD"); assert.equal(h.quotes().length, 0);
+  h.advance(1000); h.tick(0, 8); h.tick(1, 9);
+  h.scanner.requestBestPair(0.5, "USD"); assert.equal(h.quotes().length, 0);
+  h.advance(1000); h.tick(1, 0);
+  h.scanner.requestBestPair(0.5, "USD"); assert.equal(h.quotes().length, 2);
+  h.quotes().forEach((q) => h.replyQuote(q, 0.61));
+  assert.equal(h.buys().length, 2);
+});
+
+test("Under 8 expires triggers and invalidates a pending pair on return to 9", () => {
+  for (const reason of ["return9", "expiry", "stop", "quoteError", "funds"]) {
+    const h = harness({ mode: "under8_digit9" }); h.initialize();
+    h.scanner.requestBestPair(0.5, "USD");
+    const [a, b] = h.quotes(); h.replyQuote(a, 0.61);
+    if (reason === "return9") { h.advance(1000); h.tick(0, 9); }
+    if (reason === "expiry") { h.advance(6000); h.tick(0, 2); h.tick(1, 3); }
+    if (reason === "stop") h.scanner.stop();
+    if (reason === "quoteError") h.scanner.handle({ req_id: b.req_id, error: { message: "Unavailable" } });
+    if (reason === "funds") h.setAllowed(false);
+    h.replyQuote(b, 0.61);
+    assert.equal(h.buys().length, 0, reason);
+  }
+});
+
+test("Under 8 ignores duplicated exits and never reuses settled triggers", () => {
+  const h = harness({ mode: "under8_digit9" }); h.initialize();
+  h.tick(0, 9); // Same epoch: must not replace the actual 9 → 3 transition.
+  h.scanner.requestBestPair(0.5, "USD"); h.quotes().forEach((q) => h.replyQuote(q, 0.61));
+  const buys = h.buys(); assert.equal(buys.length, 2);
+  buys.forEach((buy, i) => h.scanner.handle({ req_id: buy.req_id, buy: { contract_id: 900 + i } }));
+  buys.forEach((_, i) => h.scanner.handle({ proposal_open_contract: { contract_id: 900 + i, is_sold: 1, profit: 0.11 } }));
+  assert.equal(h.scanner.results().stats.completed, 1);
+  h.advance(3000); h.tick(0, 2); h.tick(1, 3);
+  h.scanner.requestBestPair(0.5, "USD");
+  assert.equal(h.sent.filter((r) => r.proposal).length, 2);
+});
+
+test("Under 8 partial failure stops the session while tracking its accepted contract", () => {
+  const h = harness({ mode: "under8_digit9" }); h.initialize();
+  h.scanner.requestBestPair(0.5, "USD"); h.quotes().forEach((q) => h.replyQuote(q, 0.61));
+  const [a, b] = h.buys();
+  h.scanner.handle({ req_id: a.req_id, buy: { contract_id: 88 } });
+  h.scanner.handle({ req_id: b.req_id, error: { message: "Rejected" } });
+  assert.equal(h.scanner.active, false); assert.equal(h.scanner.busy, true);
+  h.scanner.handle({ proposal_open_contract: { contract_id: 88, is_sold: 1, profit: 0.11 } });
+  assert.equal(h.scanner.busy, false);
+  assert.equal(h.scanner.results().trades[0].status, "incomplete");
+  assert.equal(h.scanner.results().stats.completed, 0);
+  assert.equal(h.buys().length, 2);
 });

@@ -1,3 +1,4 @@
+export type PairMode = "under5_over4" | "under8_digit9";
 export type PairLeg = { contractType: "DIGITOVER" | "DIGITUNDER"; barrier: number; stake: number; symbol: string; duration: number; pair: true };
 export type PairAnalysis = {
   sampleSize: number; over: number; under: number;
@@ -30,29 +31,31 @@ export type PairTransition = { from: number; to: number; epoch: number };
 export type PairRow = PairAnalysis & { symbol: string; name: string; status: string; fresh: boolean; transition?: PairTransition | null; transitionReady?: boolean; underTransitionReady?: boolean; overTransitionReady?: boolean };
 type Message = Record<string, any>; // API envelopes are validated at each boundary below.
 
-// Tuple order everywhere: Under 5 on the first instrument, Over 4 on the second.
+// Default tuple: Under 5 first, Over 4 second. Under 8 mode uses two Under 8 legs.
 export const PAIR_SIDES = [
   { contractType: "DIGITUNDER", barrier: 5 },
   { contractType: "DIGITOVER", barrier: 4 },
 ] as const;
 
-export function analyzePairDigits(prices: number[], pipSize: number | null): PairAnalysis {
+export function analyzePairDigits(prices: number[], pipSize: number | null, mode: PairMode = "under5_over4"): PairAnalysis {
   const empty = { sampleSize: 0, over: 0, under: 0, overEstimate: 0.5, underEstimate: 0.5, underEligible: false, overEligible: false, eligible: false };
   if (pipSize === null || !Number.isInteger(pipSize) || pipSize < 0 || pipSize > 12) return empty;
   const sample = prices.slice(-200);
   if (!sample.length || sample.some((price) => !Number.isFinite(price) || Math.abs(price) >= 1e21)) return empty;
   const digits = sample.map((price) => Number(price.toFixed(pipSize).at(-1)));
-  const underCount = digits.filter((digit) => digit < 5).length;
+  const under8 = mode === "under8_digit9";
+  const barrier = under8 ? 8 : 5;
+  const underCount = digits.filter((digit) => digit < barrier).length;
   const overCount = digits.length - underCount;
   const under = underCount / digits.length;
   const over = overCount / digits.length;
   const qualifies = (wins: (digit: number) => boolean, frequency: number) => digits.length >= 100 && frequency >= 0.52
     && digits.slice(-50).filter(wins).length / 50 >= 0.50;
-  const underEligible = qualifies((digit) => digit < 5, under);
-  const overEligible = qualifies((digit) => digit > 4, over);
+  const underEligible = under8 ? digits.length >= 2 : qualifies((digit) => digit < 5, under);
+  const overEligible = !under8 && qualifies((digit) => digit > 4, over);
   return { sampleSize: digits.length, over, under,
-    overEstimate: (overCount + 25) / (digits.length + 50),
-    underEstimate: (underCount + 25) / (digits.length + 50),
+    overEstimate: (overCount + (under8 ? 10 : 25)) / (digits.length + 50),
+    underEstimate: (underCount + (under8 ? 40 : 25)) / (digits.length + 50),
     underEligible, overEligible, eligible: underEligible || overEligible };
 }
 
@@ -64,7 +67,7 @@ function lowerWinRate(row: PairAnalysis, side: "under" | "over", marketCount: nu
   return Math.max(0, Math.min((side === "under" ? row.underEstimate : row.overEstimate), row[side] - margin));
 }
 
-export function selectPairMarkets(rows: PairRow[]): [PairRow, PairRow] | null {
+export function selectPairMarkets(rows: PairRow[], mode: PairMode = "under5_over4"): [PairRow, PairRow] | null {
   let best: [PairRow, PairRow] | null = null;
   let bestScore = -Infinity;
   // Consider every ordered combination, excluding the same instrument.
@@ -72,8 +75,8 @@ export function selectPairMarkets(rows: PairRow[]): [PairRow, PairRow] | null {
   for (const under of ordered) {
     if (!under.eligible || !under.underEligible || !under.fresh) continue;
     for (const over of ordered) {
-      if (over.symbol === under.symbol || !over.eligible || !over.overEligible || !over.fresh) continue;
-      const score = under.underEstimate + over.overEstimate;
+      if (over.symbol === under.symbol || !over.eligible || !(mode === "under8_digit9" ? over.underEligible : over.overEligible) || !over.fresh) continue;
+      const score = under.underEstimate + (mode === "under8_digit9" ? over.underEstimate : over.overEstimate);
       if (score > bestScore) { bestScore = score; best = [under, over]; }
     }
   }
@@ -99,35 +102,38 @@ export function volatilitySymbols(items: Message[]) {
   });
 }
 
-export function supportsPairLeg(contracts: Message[], type: PairLeg["contractType"]) {
+export function supportsPairLeg(contracts: Message[], type: PairLeg["contractType"], barrier = type === "DIGITUNDER" ? 5 : 4) {
   return contracts.some((contract) => {
     const minimum = String(contract.min_contract_duration ?? "");
     const maximum = String(contract.max_contract_duration ?? "");
-    const barrier = type === "DIGITUNDER" ? 5 : 4;
     return contract.contract_type === type && (!Array.isArray(contract.last_digit_range) || contract.last_digit_range.map(Number).includes(barrier))
       && /^\d+t$/.test(minimum) && Number(minimum.slice(0, -1)) <= 1
       && (!/^\d+t$/.test(maximum) || Number(maximum.slice(0, -1)) >= 1);
   });
 }
 
-export function evaluatePairQuotes(rows: [PairRow, PairRow], quotes: { ask: number; payout: number }[], stake: number, marketCount = 2) {
+export function evaluatePairQuotes(rows: [PairRow, PairRow], quotes: { ask: number; payout: number }[], stake: number, marketCount = 2, mode: PairMode = "under5_over4") {
+  const under8 = mode === "under8_digit9";
+  const secondEstimate = under8 ? rows[1].underEstimate : rows[1].overEstimate;
   const valid = rows[0].symbol !== rows[1].symbol && quotes.length === 2 && Number.isFinite(stake) && stake >= 0.35 && quotes.every((quote) => Number.isFinite(quote.ask) && quote.ask > 0 && quote.ask <= stake + 1e-8 && Number.isFinite(quote.payout) && quote.payout > quote.ask);
   const cost = quotes.reduce((sum, quote) => sum + quote.ask, 0);
-  const expectedValue = quotes.length === 2 ? rows[0].underEstimate * quotes[0].payout + rows[1].overEstimate * quotes[1].payout - cost : -Infinity;
+  const expectedValue = quotes.length === 2 ? rows[0].underEstimate * quotes[0].payout + secondEstimate * quotes[1].payout - cost : -Infinity;
   const underLower = lowerWinRate(rows[0], "under", marketCount);
-  const overLower = lowerWinRate(rows[1], "over", marketCount);
-  const legExpectedValues = quotes.length === 2 ? [rows[0].underEstimate * quotes[0].payout - quotes[0].ask, rows[1].overEstimate * quotes[1].payout - quotes[1].ask] : [-Infinity, -Infinity];
+  const overLower = lowerWinRate(rows[1], under8 ? "under" : "over", marketCount);
+  const legExpectedValues = quotes.length === 2 ? [rows[0].underEstimate * quotes[0].payout - quotes[0].ask, secondEstimate * quotes[1].payout - quotes[1].ask] : [-Infinity, -Infinity];
   // Retained for diagnosis only: the reactive entry mode uses historical point
   // estimates, which are not a statistically established predictive advantage.
   const conservativeExpectedValue = quotes.length === 2 ? underLower * quotes[0].payout + overLower * quotes[1].payout - cost : -Infinity;
   // With 50/50 barriers, one winning payout may NOT cover both stakes.
-  // Require each leg to pass its own quote check, then check their summed EV.
+  // Under 5 / Over 4 keeps its EV filter. Under 8 retains its digit-exit trigger;
+  // historical EV is diagnostic, never an additional entry gate for that mode.
   return { cost, expectedValue, conservativeExpectedValue, underLower, overLower, legExpectedValues,
-    accepted: valid && rows.every((row) => row.eligible && row.fresh) && rows[0].underEligible && rows[1].overEligible
-      && legExpectedValues.every((value) => value > 0) && expectedValue > 0 };
+    accepted: valid && rows.every((row) => row.eligible && row.fresh) && rows[0].underEligible && (under8 ? rows[1].underEligible : rows[1].overEligible)
+      && (under8 || (legExpectedValues.every((value) => value > 0) && expectedValue > 0)) };
 }
 
 type PairOptions = {
+  mode?: PairMode;
   send: (message: Message) => void; nextId: () => number;
   onUpdate: () => void; onStatus: (message: string) => void; onHalt: (message: string) => void;
   canBuy: (totalCost: number) => boolean;
@@ -166,6 +172,9 @@ export class OverUnderPairScanner {
   private faulted = false;
 
   constructor(private options: PairOptions) { this.now = options.now ?? Date.now; }
+  get mode(): PairMode { return this.options.mode ?? "under5_over4"; }
+  private get under8() { return this.mode === "under8_digit9"; }
+  private get sides() { return this.under8 ? [{ contractType: "DIGITUNDER", barrier: 8 }, { contractType: "DIGITUNDER", barrier: 8 }] as const : PAIR_SIDES; }
   get busy() { return this.quoteBatch !== null || this.buys.size > 0 || this.openContracts.size > 0; }
   get uncertain() { return [...this.buys.values()].some((buy) => !buy.resolved); }
   get active() { return this.running; }
@@ -239,7 +248,7 @@ export class OverUnderPairScanner {
     const now = this.now();
     return [...this.markets.values()].map((market) => {
       const prices = [...market.points].sort((a, b) => a[0] - b[0]).map((point) => point[1]);
-      const analysis = analyzePairDigits(prices, market.pipSize);
+      const analysis = analyzePairDigits(prices, market.pipSize, this.mode);
       const fresh = now - market.updatedAt <= 5000 && market.updatedAt > 0;
       const paused = (this.cooldown.get(market.symbol) ?? 0) > now;
       const available = market.status === "Actif" && fresh && !paused;
@@ -248,11 +257,11 @@ export class OverUnderPairScanner {
       const transition = this.transitions.get(market.symbol) ?? null;
       const transitionFresh = !!transition && transition.epoch > (this.consumedTransitions.get(market.symbol) ?? -Infinity)
         && now - transition.epoch * 1000 >= 0 && now - transition.epoch * 1000 <= 5000;
-      const underTransitionReady = transitionFresh && transition!.from >= 5 && transition!.to < 5;
-      const overTransitionReady = transitionFresh && transition!.from < 5 && transition!.to >= 5;
+      const underTransitionReady = transitionFresh && (this.under8 ? transition!.from === 9 && transition!.to !== 9 : transition!.from >= 5 && transition!.to < 5);
+      const overTransitionReady = !this.under8 && transitionFresh && transition!.from < 5 && transition!.to >= 5;
       const transitionReady = (underEligible && underTransitionReady) || (overEligible && overTransitionReady);
       return { ...analysis, underEligible, overEligible, eligible: underEligible || overEligible, symbol: market.symbol, name: market.name, fresh, transition, transitionReady, underTransitionReady, overTransitionReady,
-        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < 100 ? "Collecte (100 min.)" : paused ? "Pause indice" : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
+        status: market.status !== "Actif" ? market.status : !fresh ? "Flux périmé" : analysis.sampleSize < (this.under8 ? 2 : 100) ? "Collecte des ticks" : paused ? "Pause indice" : this.under8 ? (underTransitionReady ? "Under 8 · signal prêt" : "Under 8 · attente 9 → autre digit") : underEligible ? "Candidat Under 5" : overEligible ? "Candidat Over 4" : "Attente fréquences" };
     }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || Math.max(b.over, b.under) - Math.max(a.over, a.under) || a.symbol.localeCompare(b.symbol));
   }
 
@@ -263,12 +272,12 @@ export class OverUnderPairScanner {
       return;
     }
     const available = this.rows();
-    const rows = selectPairMarkets(available.map((row) => ({ ...row, underEligible: row.underEligible && !!row.underTransitionReady, overEligible: row.overEligible && !!row.overTransitionReady })));
+    const rows = selectPairMarkets(available.map((row) => ({ ...row, underEligible: row.underEligible && !!row.underTransitionReady, overEligible: row.overEligible && !!row.overTransitionReady })), this.mode);
     if (!rows) {
       const under = available.filter((row) => row.underEligible).length;
       const over = available.filter((row) => row.overEligible).length;
       const ready = available.filter((row) => row.eligible && row.transitionReady).length;
-      this.options.onStatus(`Attente transition · ${under} candidat(s) Under 5 · ${over} candidat(s) Over 4 · ${ready} indice(s) avec passage récent vers la zone gagnante`);
+      this.options.onStatus(this.under8 ? `Under 8 · ${ready}/2 indices avec sortie récente du digit 9 · ${under} indices disponibles` : `Attente transition · ${under} candidat(s) Under 5 · ${over} candidat(s) Over 4 · ${ready} indice(s) avec passage récent vers la zone gagnante`);
       return;
     }
     if (!Number.isFinite(stake) || stake < 0.35 || !this.options.canBuy(2 * stake)) return;
@@ -278,9 +287,9 @@ export class OverUnderPairScanner {
     // reuse the same digit change to open a later pair.
     rows.forEach((row) => this.consumedTransitions.set(row.symbol, row.transition!.epoch));
     ids.forEach((id) => this.ownedIds.add(id));
-    this.options.onStatus(`Transition ${rows[0].transition!.from} → ${rows[0].transition!.to} · Under 5 ${rows[0].symbol} + ${rows[1].transition!.from} → ${rows[1].transition!.to} · Over 4 ${rows[1].symbol} · total ${(stake * 2).toFixed(2)} ${currency}`);
+    this.options.onStatus(`Transition ${rows[0].transition!.from} → ${rows[0].transition!.to} · Under ${this.sides[0].barrier} ${rows[0].symbol} + ${rows[1].transition!.from} → ${rows[1].transition!.to} · ${this.under8 ? "Under 8" : "Over 4"} ${rows[1].symbol} · total ${(stake * 2).toFixed(2)} ${currency}`);
     try {
-      ids.forEach((id, index) => this.options.send({ proposal: 1, underlying_symbol: rows[index].symbol, contract_type: PAIR_SIDES[index].contractType, barrier: PAIR_SIDES[index].barrier, amount: stake, basis: "stake", currency, duration: 1, duration_unit: "t", req_id: id }));
+      ids.forEach((id, index) => this.options.send({ proposal: 1, underlying_symbol: rows[index].symbol, contract_type: this.sides[index].contractType, barrier: this.sides[index].barrier, amount: stake, basis: "stake", currency, duration: 1, duration_unit: "t", req_id: id }));
     } catch { this.halt("Paire annulée : connexion perdue pendant les cotations."); }
   }
 
@@ -291,19 +300,19 @@ export class OverUnderPairScanner {
     const quotes = batch.quotes as Quote[];
     const latest = this.rows();
     const current = batch.rows.map((selected) => latest.find((row) => row.symbol === selected.symbol) ?? { ...selected, eligible: false, fresh: false }) as [PairRow, PairRow];
-    const evaluation = evaluatePairQuotes(current, quotes, batch.stake, this.markets.size);
+    const evaluation = evaluatePairQuotes(current, quotes, batch.stake, this.markets.size, this.mode);
     const transitionsFresh = batch.rows.every((row, index) => row.transition && current[index].transition?.epoch === row.transition.epoch
       && this.now() - row.transition.epoch * 1000 >= 0 && this.now() - row.transition.epoch * 1000 <= 5000);
     if (!this.running || !transitionsFresh || quotes.some((quote) => this.now() - quote.receivedAt > 2500) || !evaluation.accepted || !this.options.canBuy(evaluation.cost)) {
       batch.rows.forEach((row) => this.cooldown.set(row.symbol, this.now() + 10000));
-      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · entrée refusée : transition invalidée ou données/cotations périmées, ou espérance historique non positive sur un contrat · EV paire ${evaluation.expectedValue.toFixed(3)}`);
+      this.options.onStatus(`${batch.rows[0].symbol} / ${batch.rows[1].symbol} · entrée refusée : transition invalidée ou données/cotations périmées, ${this.under8 ? "solde insuffisant" : "espérance historique non positive sur un contrat"} · EV paire ${evaluation.expectedValue.toFixed(3)}`);
       return;
     }
     this.purchaseStartedAt = this.now();
     batch.rows.forEach((row) => this.cooldown.set(row.symbol, this.now() + 3000));
     const trade: PairTrade = { id: batch.ids[0],
       cost: evaluation.cost, expectedValue: evaluation.expectedValue, conservativeExpectedValue: evaluation.conservativeExpectedValue,
-      status: "open", netProfit: null, legs: batch.rows.map((row, index) => ({ ...PAIR_SIDES[index], pair: true, symbol: row.symbol, name: row.name, stake: quotes[index].ask, duration: 1, contractId: null, profit: null, failed: false })) };
+      status: "open", netProfit: null, legs: batch.rows.map((row, index) => ({ ...this.sides[index], pair: true, symbol: row.symbol, name: row.name, stake: quotes[index].ask, duration: 1, contractId: null, profit: null, failed: false })) };
     this.pairTrades.unshift(trade);
     if (this.pairTrades.length > 50) {
       const removed = this.pairTrades.pop()!;
@@ -311,7 +320,7 @@ export class OverUnderPairScanner {
     }
     const requests = quotes.map((quote, index) => {
       const id = this.options.nextId();
-      const leg: PairLeg = { ...PAIR_SIDES[index], pair: true, symbol: batch.rows[index].symbol, duration: 1, stake: quote.ask };
+      const leg: PairLeg = { ...this.sides[index], pair: true, symbol: batch.rows[index].symbol, duration: 1, stake: quote.ask };
       this.buys.set(id, { leg, resolved: false, trade, index });
       this.options.onBuyRequest(id, leg);
       return { buy: quote.id, price: quote.ask, req_id: id };
@@ -430,8 +439,8 @@ export class OverUnderPairScanner {
     if (request?.kind === "contracts" && Array.isArray(message.contracts_for?.available)) {
       this.requests.delete(id);
       const market = this.markets.get(request.symbol!)!;
-      market.supportsUnder = supportsPairLeg(message.contracts_for.available, "DIGITUNDER");
-      market.supportsOver = supportsPairLeg(message.contracts_for.available, "DIGITOVER");
+      market.supportsUnder = supportsPairLeg(message.contracts_for.available, "DIGITUNDER", this.under8 ? 8 : 5);
+      market.supportsOver = !this.under8 && supportsPairLeg(message.contracts_for.available, "DIGITOVER");
       const supported = market.supportsUnder || market.supportsOver;
       market.status = supported ? "Collecte" : "Contrats 1 tick indisponibles";
       if (supported) this.enqueue({ ticks_history: market.symbol, count: 200, end: "latest", style: "ticks", subscribe: 1 }, { kind: "history", symbol: market.symbol });
@@ -465,11 +474,11 @@ export class OverUnderPairScanner {
     if (live && previous && market.pipSize !== null && Number.isInteger(market.pipSize) && market.pipSize >= 0 && market.pipSize <= 12) {
       const from = Number(previous[1].toFixed(market.pipSize).at(-1));
       const to = Number(price.toFixed(market.pipSize).at(-1));
-      if ((from < 5) !== (to < 5)) {
-        // A zone exit always invalidates the prior event, even when the new
-        // timestamp is unsuitable to create a fresh entry signal.
+      if (this.under8 ? from === 9 || to === 9 : (from < 5) !== (to < 5)) {
+        // A zone change (or return to 9 in Under 8 mode) invalidates the
+        // prior event even if the timestamp cannot create a fresh signal.
         this.transitions.delete(market.symbol);
-        if (epoch * 1000 <= this.now() && this.now() - epoch * 1000 <= 5000 && epoch - previous[0] <= 5) {
+        if ((!this.under8 || (from === 9 && to !== 9)) && epoch * 1000 <= this.now() && this.now() - epoch * 1000 <= 5000 && epoch - previous[0] <= 5) {
           this.transitions.set(market.symbol, { from, to, epoch });
         }
       }

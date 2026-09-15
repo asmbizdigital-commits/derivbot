@@ -30,3 +30,13 @@ test("the strategy panel edits amounts above 2 and displays their actual combine
   assert.match(html, /Total calculé : 15\.00 USD/);
   assert.doesNotMatch(html, /Budget de perte/);
 });
+
+test("Under 8 panel shows its own trigger, payoff zones and two independent contracts", () => {
+  const html = renderToStaticMarkup(React.createElement(context.Panel, { ...props, mode: "under8_digit9" }));
+  assert.match(html, /Under 8 · déclencheur digit 9/);
+  assert.match(html, /deux indices distincts/);
+  assert.match(html, /9 → un autre digit \(0–8\)/);
+  assert.match(html, /0–7 gagnent, 8 et 9 perdent/);
+  assert.match(html, /0 signaux Under 8 prêts \/ 2 nécessaires/);
+  assert.doesNotMatch(html, /Under 5|Over 4|fréquence ≥ 52/);
+});
