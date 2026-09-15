@@ -9,7 +9,7 @@ import { MatchPredictionBalloon } from "@/components/match-prediction-balloon";
 import { evaluateOverUnderQuote, getUnderEightTransitionState, type OverUnderCandidate } from "@/lib/over-under-prediction";
 import { buildRiseFallSignal, evaluateRiseFallQuote, type RiseFallSignal } from "@/lib/rise-fall-prediction";
 import { OverUnderPairPanel } from "@/components/over-under-pair-panel";
-import { OverUnderPairScanner, type PairRow } from "@/lib/over-under-pair";
+import { OverUnderPairScanner, EMPTY_PAIR_STATS, type PairRow, type PairTrade, type PairStats } from "@/lib/over-under-pair";
 import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, evaluateMatchQuote, isFastMatchMode, type MatchCandidate, type MatchStrategyRules } from "@/lib/match-prediction";
 import { DERIV_MARKETS, DERIV_MARKET_PIP_SIZES, isDerivMarketSymbol, type DerivMarketSymbol } from "@/lib/deriv-markets";
 
@@ -850,6 +850,8 @@ export default function Home() {
   const derivPairStopLossRef = useRef(4);
   const [derivPairStopLoss, setDerivPairStopLoss] = useState(4);
   const [derivPairRows, setDerivPairRows] = useState<PairRow[]>([]);
+  const [derivPairTrades, setDerivPairTrades] = useState<PairTrade[]>([]);
+  const [derivPairStats, setDerivPairStats] = useState<PairStats>({ ...EMPTY_PAIR_STATS });
   const derivPairUiUpdateRef = useRef(0);
   const derivPortfolioReadyRef = useRef(false);
   const derivOverUnderQuoteScanRef = useRef<DerivOverUnderQuoteScan | null>(null);
@@ -1079,6 +1081,9 @@ export default function Home() {
   function connectDerivSocket(url: string, mode: "public" | AccountMode) {
     derivPairScannerRef.current?.dispose();
     derivPairScannerRef.current = null;
+    setDerivPairRows([]);
+    setDerivPairTrades([]);
+    setDerivPairStats({ ...EMPTY_PAIR_STATS });
     derivPortfolioReadyRef.current = false;
     derivPendingBuysRef.current.clear();
     derivAutoRunningRef.current = false;
@@ -1549,6 +1554,8 @@ export default function Home() {
     setDerivMode("auto");
     setDerivAutoRunning(true);
     setDerivPairRows([]);
+    setDerivPairTrades([]);
+    setDerivPairStats({ ...EMPTY_PAIR_STATS });
     const scanner = new OverUnderPairScanner({
       nextId: () => ++derivReqIdRef.current,
       send: (message) => {
@@ -1580,6 +1587,7 @@ export default function Home() {
       },
       onBuyRequest: (id, leg) => { derivPendingBuysRef.current.set(id, leg); },
       onSignal: registerDerivSessionSignal,
+      onResults: (trades, stats) => { setDerivPairTrades(trades); setDerivPairStats(stats); },
     });
     derivPairScannerRef.current = scanner;
     setDerivAutoStatus("Découverte de tous les indices de volatilité disponibles…");
@@ -2278,7 +2286,7 @@ export default function Home() {
 	                {(Object.entries(derivOverUnderStrategies) as [DerivOverUnderStrategy, typeof derivOverUnderStrategies[DerivOverUnderStrategy]][]).map(([key, strategy]) => <button key={key} type="button" disabled={derivAutoRunning} className={derivOverUnderStrategy === key ? "selected" : ""} onClick={() => changeDerivOverUnderStrategy(key)}>{strategy.name}</button>)}
 	              </div>
 	            </div>}
-	            {isPairedOverUnder && <OverUnderPairPanel rows={derivPairRows} stake={derivStake} currency={derivCurrency} stopLoss={derivPairStopLoss} running={derivAutoRunning} onStopLoss={(value) => { derivPairStopLossRef.current = value; setDerivPairStopLoss(value); }}/>}
+	            {isPairedOverUnder && <OverUnderPairPanel rows={derivPairRows} trades={derivPairTrades} stats={derivPairStats} stake={derivStake} currency={derivCurrency} stopLoss={derivPairStopLoss} running={derivAutoRunning} onStopLoss={(value) => { derivPairStopLossRef.current = value; setDerivPairStopLoss(value); }}/>}
 	            {derivMode === "manual" ? <>
 	              {isOverUnderCategory ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
 	              {needsDigitBarrier(derivContractType) && !isOverUnderCategory && <div className="digit-barrier"><label>Digit / barrière<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection rapide du digit">{selectedContractBarrierOptions.map((digit) => <button key={digit} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
