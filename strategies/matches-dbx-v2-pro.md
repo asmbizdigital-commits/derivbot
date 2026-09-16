@@ -26,9 +26,9 @@ La martingale est initialisée à **FALSE**. Son code pourrait multiplier la var
 
 ## Adaptation dans l’application
 
-- Digit **1**, instrument **1HZ50V**, durée **1 tick**, **un contrat à la fois**.
+- Digit **1**, instrument **1HZ50V**, durée réglable de **1 à 10 ticks** (1 par défaut), **un contrat à la fois**. Choisir la durée avant Play dans **Durée en ticks** ; arrêter le bot et attendre la clôture du contrat avant de la modifier.
 - Mise de départ **5 dans la devise du compte**, réglable dans le champ de mise. Elle reste constante après un gain ou une perte ; aucune martingale ou multiplication liée au solde ne s’applique.
-- Aucun filtre statistique, blocage du digit après pertes ou seuil d’Edge n’est ajouté. Le panneau de prédiction statistique est masqué pour ce profil.
+- Aucun filtre statistique, blocage du digit après pertes ou seuil d’Edge n’est ajouté. Le popup de prédiction Matches est affiché, avec le dernier digit reçu et un rappel du digit 1 acheté et de la durée. Ses estimations sont informatives et ne modifient pas le digit ou les entrées de V2 ; elles concernent le prochain tick, pas une échéance de plusieurs ticks.
 - Après clôture, le prochain traitement de ticks peut déclencher le contrat suivant. Le bot attend toujours la résolution de la cotation, de l’achat et du contrat précédent.
 - Cotation valide et solde suffisant requis. Le bouton **Stop**, la connexion et la limite de signaux de l’application restent applicables.
 - Choisir ou importer ce profil ne lance pas les achats : utiliser **Play**.
@@ -46,9 +46,12 @@ Le nom commercial du bot n’apporte aucune preuve d’un avantage prédictif ou
   "barrierMode": "fixed",
   "fixedDigit": 1,
   "stake": 5,
+  "durationTicks": 1,
   "contractsPerSignal": 1,
   "bypassPayoutFilter": true
 }
 ```
 
-Le mode `dbx_fixed` impose les paramètres opérationnels extraits du XML (digit 1, instrument 1HZ50V, durée 1 tick, un contrat). Seule la mise est personnalisable par ce profil ; il ne s’agit pas d’un importeur universel de bots XML.
+Le mode `dbx_fixed` impose les paramètres opérationnels extraits du XML (digit 1, instrument 1HZ50V, un contrat). La mise et la durée en ticks sont personnalisables dans cette adaptation ; il ne s’agit pas d’un importeur universel de bots XML.
+
+La règle Matches porte sur le dernier digit du **tick final** du contrat, comme décrit dans la [documentation Deriv](https://legacy-docs.deriv.com/docs/digit-matchesdiffers).

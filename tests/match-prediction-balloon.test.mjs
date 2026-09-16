@@ -49,3 +49,16 @@ test("V3.1 popup exposes evidence progress and the live payout refusal reason", 
   assert.match(html, /Contrôle payout V3\.1 · 50\/200 ticks/);
   assert.match(html, /Refus payout : seuil 11\.20%, estimation prudente 7\.00%/);
 });
+
+test("V2 popup shows live estimates and last digit while keeping the traded digit fixed", () => {
+  const html = render([...Array(30).fill(7), ...Array(20).fill(3)], {
+    fixedContract: { digit: 1, duration: 7 }, selectedDigit: 1,
+    strategyRules: { ...context.rules, selectionMode: "top_two_adaptive" },
+  });
+  assert.match(html, /DBX V2 · digit fixe 1 · 7 ticks/);
+  assert.match(html, /Prédiction informative/);
+  assert.match(html, /Dernier digit reçu : 3/);
+  assert.match(html, /DIGIT ESTIMÉ/);
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 10);
+  assert.match(render([], { fixedContract: { digit: 1, duration: 1 } }), /Dernier digit reçu : indisponible/);
+});

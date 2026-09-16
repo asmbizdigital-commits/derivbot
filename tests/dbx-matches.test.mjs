@@ -307,3 +307,78 @@ test("V3.1 stops on an unknown settlement profit instead of treating it as zero"
   assert.equal(context.continued, false); assert.equal(halted.length, 1);
   assert.match(halted[0], /résultat net manquant/);
 });
+
+test("V2 duration is imported, validated and used in automatic orders without changing the fixed digit", () => {
+  const doc = read("../strategies/matches-dbx-v2-pro.md");
+  assert.equal(parseAdvancedMatchStrategyMarkdown(doc).durationTicks, 1);
+  const custom = parseAdvancedMatchStrategyMarkdown(doc.replace('"durationTicks": 1', '"durationTicks": 7'));
+  assert.equal(custom.durationTicks, 7);
+  for (const duration of [1, 2, 5, 10]) {
+    const h = harness(); h.state.derivMatchStrategyRef.current = { ...dbxMatchStrategy, durationTicks: duration };
+    h.run(); assert.equal(h.orders[0].duration, duration); assert.equal(h.orders[0].barrier, 1);
+    assert.match(h.statuses.at(-1), new RegExp(`${duration} tick`));
+  }
+  for (const duration of [0, -1, 11, 1.5, NaN, Infinity]) assert.equal(buildDbxMatchOrder(5, 1, duration), null);
+  for (const mode of [true, "last"]) {
+    const h = harness(mode); h.state.derivMatchStrategyRef.current = { ...h.state.derivMatchStrategyRef.current, durationTicks: 7 };
+    h.run(mostly(7)); assert.equal(h.orders[0].duration, 1, "other versions retain one tick");
+  }
+  const h = harness(); h.state.derivAutoRunningRef.current = false; h.select();
+  assert.ok(h.selected.some(([name, value]) => name === "setMatchPredictionOpen" && value === true));
+});
+
+test("V2 duration changes update the live strategy and cannot change a running or pending contract", () => {
+  const code = page.slice(page.indexOf("  function changeDbxDuration("), page.indexOf("  function selectMatchStrategy("));
+  for (const blocked of ["none", "running", "open", "buy", "quote", "other", "invalid"]) {
+    const updated = [];
+    const context = vm.createContext({
+      derivAutoRunningRef: { current: blocked === "running" },
+      derivOpenContractsRef: { current: new Set(blocked === "open" ? [1] : []) },
+      derivPendingBuysRef: { current: new Map(blocked === "buy" ? [[1, {}]] : []) },
+      derivAutoQuoteRef: { current: new Map(blocked === "quote" ? [[1, {}]] : []) },
+      derivMatchStrategyRef: { current: blocked === "other" ? dbxDynamicMatchStrategy : dbxMatchStrategy },
+      setMatchStrategy: (value) => updated.push(value), setDerivProposal() {},
+    });
+    vm.runInContext(ts.transpileModule(code + `\nchangeDbxDuration(${blocked === "invalid" ? 11 : 7});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    assert.equal(updated.length, blocked === "none" ? 1 : 0, blocked);
+    if (updated.length) assert.equal(context.derivMatchStrategyRef.current.durationTicks, 7);
+  }
+});
+
+test("selected duration is sent to Deriv in ticks and retained with the pending quote", () => {
+  const code = page.slice(page.indexOf("  function requestDerivAutoPosition("), page.indexOf("  function changeDerivContractCategory("));
+  const sent = []; const quotes = new Map();
+  const context = vm.createContext({
+    derivAutoRunningRef: { current: true }, derivStatusRef: { current: "demo" }, isDerivTradingStatus: () => true,
+    WebSocket: { OPEN: 1 }, derivReqIdRef: { current: 10 }, derivAutoQuoteRef: { current: quotes },
+    derivCurrencyRef: { current: "USD" }, setDerivAutoStatus() {}, formatDerivContract: () => "Matches 1",
+    needsDigitBarrier: () => true, needsTouchBarrier: () => false,
+    socket: { readyState: 1, send: (value) => sent.push(JSON.parse(value)) }, order: buildDbxMatchOrder(5, 1, 7),
+  });
+  vm.runInContext(ts.transpileModule(code + "\nrequestDerivAutoPosition(socket, order);", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  assert.equal(sent[0].duration, 7); assert.equal(sent[0].duration_unit, "t"); assert.equal(sent[0].barrier, 1);
+  assert.equal(quotes.get(11).duration, 7);
+});
+
+test("V2 tick selector exposes ten choices and forwards the selection before Play", async () => {
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const ast = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let selector;
+  function visit(node) {
+    if (ts.isJsxElement(node) && node.openingElement.getText(ast).includes('aria-label="Durée DBX V2 en ticks"')) selector = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(ast); assert.ok(selector);
+  const changed = [];
+  const context = vm.createContext({ React, DBX_MATCH_CONFIG, matchStrategy: { ...dbxMatchStrategy, durationTicks: 7 }, derivAutoRunning: false,
+    changeDbxDuration: (value) => changed.push(value) });
+  const code = ts.transpileModule(`globalThis.selector = (${selector.getText(ast)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
+  vm.runInContext(code, context);
+  const html = renderToStaticMarkup(context.selector);
+  assert.equal((html.match(/<option /g) ?? []).length, 10);
+  assert.match(html, /value="7" selected=""/);
+  context.selector.props.onChange({ target: { value: "10" } }); assert.deepEqual(changed, [10]);
+  context.derivAutoRunning = true; vm.runInContext(code, context);
+  assert.equal(context.selector.props.disabled, true);
+});
