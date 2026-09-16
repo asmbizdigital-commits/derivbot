@@ -12,6 +12,7 @@ type MatchPredictionBalloonProps = {
   ticks: number[];
   selectedDigit: number;
   strategyRules?: MatchStrategyRules;
+  quoteGuard?: { minimumTicks: number; status: string };
   onClose: () => void;
   onOpen: () => void;
   onSelectDigit: (digit: number) => void;
@@ -19,7 +20,7 @@ type MatchPredictionBalloonProps = {
 
 type BalloonPosition = { x: number; y: number } | null;
 
-export function MatchPredictionBalloon({ open, connected, marketName, pipSize, ticks, selectedDigit, strategyRules = DEFAULT_MATCH_STRATEGY_RULES, onClose, onOpen, onSelectDigit }: MatchPredictionBalloonProps) {
+export function MatchPredictionBalloon({ open, connected, marketName, pipSize, ticks, selectedDigit, strategyRules = DEFAULT_MATCH_STRATEGY_RULES, quoteGuard, onClose, onOpen, onSelectDigit }: MatchPredictionBalloonProps) {
   const [minimized, setMinimized] = useState(false);
   const [position, setPosition] = useState<BalloonPosition>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; left: number; top: number } | null>(null);
@@ -91,6 +92,8 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
         <span><small>{lastDigitMode ? "DIGIT À MATCHER" : "DIGIT ESTIMÉ"}</small><strong>{candidate?.digit ?? "-"}</strong></span>
         <div><small>{lastDigitMode ? "FRÉQUENCE OBSERVÉE" : adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
+
+      {quoteGuard && <p className="digit-balloon-note" aria-live="polite"><b>Contrôle payout V3.1 · {Math.min(liveTicks.length, quoteGuard.minimumTicks)}/{quoteGuard.minimumTicks} ticks</b><br/>{quoteGuard.status}</p>}
 
       <div className="match-refresh-status match-last-tick" aria-live="polite" aria-atomic="true"><Clock3/><span>Dernier digit reçu <small>{lastQuote === null ? "En attente de tick" : `Dernier tick : ${lastQuote}`}</small></span><b aria-label={`Dernier digit reçu : ${lastDigit ?? "indisponible"}`}>{lastDigit ?? "—"}</b></div>
 

@@ -40,3 +40,12 @@ test("V3 popup keeps its adaptive estimate and the latest observed digit", () =>
   assert.match(html, /Dernier digit reçu : 3/);
   assert.doesNotMatch(html, /MOST APPEARING #1/);
 });
+
+test("V3.1 popup exposes evidence progress and the live payout refusal reason", () => {
+  const html = render([...Array(30).fill(7), ...Array(20).fill(3)], {
+    strategyRules: { ...context.rules, selectionMode: "top_two_adaptive" },
+    quoteGuard: { minimumTicks: 200, status: "Refus payout : seuil 11.20%, estimation prudente 7.00%" },
+  });
+  assert.match(html, /Contrôle payout V3\.1 · 50\/200 ticks/);
+  assert.match(html, /Refus payout : seuil 11\.20%, estimation prudente 7\.00%/);
+});

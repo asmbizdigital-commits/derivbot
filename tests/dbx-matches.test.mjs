@@ -12,8 +12,8 @@ const importer = page.slice(page.indexOf("const defaultImportedMatchStrategy:"),
 const runner = page.slice(page.indexOf("  function maybeRunDerivAuto("), page.indexOf("  function requestDerivOverUnderQuoteScan("));
 const selection = page.slice(page.indexOf("  function selectMatchStrategy("), page.indexOf("  async function importMatchStrategyFile("));
 const helpers = vm.createContext({});
-vm.runInContext(ts.transpileModule(config + prediction + importer + "\nglobalThis.api = { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, helpers);
-const { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy } = helpers.api;
+vm.runInContext(ts.transpileModule(config + prediction + importer + "\nglobalThis.api = { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, helpers);
+const { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy } = helpers.api;
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("importable DBX profile reflects fixed XML trade options without a statistical entry", () => {
@@ -47,7 +47,7 @@ function harness(dynamic = false) {
   };
   const state = Object.fromEntries(Object.entries(refs).map(([key, current]) => [key, { current }]));
   const orders = [], statuses = [], selected = [];
-  const context = vm.createContext({ ...state, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy, defaultImportedMatchStrategy: {}, importedMatchProfile: null, buildDbxMatchOrder,
+  const context = vm.createContext({ ...state, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, isDbxMode, buildMatchPrediction, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy, defaultImportedMatchStrategy: {}, importedMatchProfile: null, buildDbxMatchOrder,
     isDerivTradingStatus: (status) => status === "demo", pairBalanceAllows: (cost, balance) => balance >= cost,
     setDerivAutoStatus: (text) => statuses.push(text),
     stopDerivAutoOnSignalLimit: () => { state.derivAutoRunningRef.current = false; },
@@ -120,7 +120,7 @@ test("strategy selector exposes DBX and its fixed stake can be edited before Pla
     compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText, context);
   assert.match(renderToStaticMarkup(context.selector), /DBX \(V2\) Pro/);
-  assert.match(renderToStaticMarkup(context.selector), /DBX \(V3\) Adaptatif/);
+  assert.match(renderToStaticMarkup(context.selector), /DBX \(V3\.1\) Adaptatif/);
   assert.match(renderToStaticMarkup(context.selector), /DBX \(V4\) Last Digit/);
   context.selector.props.onChange({ target: { value: "dbx" } });
   assert.deepEqual(selected, ["dbx"]);
@@ -129,7 +129,7 @@ test("strategy selector exposes DBX and its fixed stake can be edited before Pla
 });
 
 const prices = (digits) => digits.map((digit) => 100 + digit / 1000);
-const mostly = (digit, second = 2) => prices([...Array(40).fill(digit), ...Array(10).fill(second)]);
+const mostly = (digit, second = 2) => prices(Array.from({ length: 200 }, (_, i) => i % 5 === 0 ? second : digit));
 
 test("V3 imports as a separately named dynamic profile while V2 remains fixed", () => {
   const dynamic = parseAdvancedMatchStrategyMarkdown(read("../strategies/matches-dbx-v3-adaptatif.md"));
@@ -140,13 +140,14 @@ test("V3 imports as a separately named dynamic profile while V2 remains fixed", 
   assert.equal(dynamic.rules.selectionMode, "top_two_adaptive");
   assert.equal(dynamic.rules.minimumTicks, 50); assert.equal(dynamic.rules.windowSize, 50);
   assert.equal(dynamic.stake, 5); assert.equal(dynamic.contractsPerSignal, 1);
+  assert.equal(dynamic.bypassPayoutFilter, false); assert.equal(dynamic.lossBudgetStakes, 4);
   const modified = read("../strategies/matches-dbx-v3-adaptatif.md").replace('"stake": 5', '"stake": 3.5').replace('"fixedDigit": null', '"fixedDigit": 1');
   const custom = parseAdvancedMatchStrategyMarkdown(modified);
   assert.equal(custom.stake, 3.5); assert.equal(custom.fixedDigit, null);
   assert.equal(dbxMatchStrategy.fixedDigit, 1); assert.equal(dbxMatchStrategy.executionMode, "dbx_fixed");
 });
 
-test("V3 selects a dynamic digit at 50 ticks and updates it for the next contract", () => {
+test("V3.1 selects a dynamic digit after 200 evidence ticks and updates it for the next contract", () => {
   const h = harness(true);
   h.run(mostly(7).slice(1)); assert.equal(h.orders.length, 0);
   h.state.derivDigitBarrierRef.current = 1; // An old fixed choice must not override V3.
@@ -237,4 +238,72 @@ test("V4 quote acceptance rechecks the current last digit and its Top 2 membersh
     vm.runInContext(`function check() { ${page.slice(begin, end)} return true; } globalThis.accepted = check() === true;`, context);
     assert.equal(context.accepted, accepted);
   }
+});
+
+test("V3.1 refuses insufficient evidence, negative EV and weak historical support", () => {
+  const uniform = prices(Array.from({ length: 200 }, (_, i) => i % 10));
+  const weak = evaluateDbxV3Quote({ digit: 1, probability: 0.105 }, uniform, 3, 5, 44.64);
+  assert.equal(weak.accepted, false);
+  assert.ok(Math.abs(weak.breakEven - 5 / 44.64) < 1e-12);
+  assert.ok(weak.expectedValue < 0);
+  assert.ok(weak.lowerFrequency < 0.1);
+  assert.equal(evaluateDbxV3Quote({ digit: 1, probability: 0.9 }, uniform, 3, 5, 44.64).accepted, false, "model overconfidence cannot replace evidence");
+  assert.equal(evaluateDbxV3Quote({ digit: 7, probability: 0.9 }, mostly(7).slice(1), 3, 5, 44.64).accepted, false);
+  assert.equal(evaluateDbxV3Quote({ digit: 7, probability: 0.1 }, mostly(7), 3, 5, 44.64).accepted, false, "historical clustering cannot replace model evidence");
+  const strong = evaluateDbxV3Quote({ digit: 7, probability: 0.3 }, mostly(7), 3, 5, 44.64);
+  assert.equal(strong.accepted, true);
+  assert.equal(strong.conservativeProbability, 0.3);
+  assert.ok(strong.conservativeExpectedValue >= 0.1);
+  for (const [ask, payout] of [[0,44.64],[5,NaN],[5,5],[5,Infinity]]) assert.equal(evaluateDbxV3Quote({ digit: 7, probability: 0.3 }, mostly(7), 3, ask, payout).accepted, false);
+  assert.equal(evaluateDbxV3Quote({ digit: 7, probability: 0.3 }, [NaN,...mostly(7).slice(1)], 3, 5, 44.64).accepted, false);
+});
+
+test("V3.1 reserves the next stake within the editable net loss budget", () => {
+  assert.equal(dbxV3BudgetAllows(-15, 5, 4), true);
+  assert.equal(dbxV3BudgetAllows(-15.01, 5, 4), false);
+  assert.equal(dbxV3BudgetAllows(-20, 5, 4), false);
+  assert.equal(dbxV3BudgetAllows(-20, 5, 6), true);
+  assert.equal(dbxV3BudgetAllows(NaN, 5, 4), false);
+  const h = harness(true); h.state.derivSessionPnlRef.current = -20; h.run(mostly(7));
+  assert.equal(h.orders.length, 0); assert.equal(h.state.derivAutoRunningRef.current, false);
+  const valid = harness(true); valid.run(mostly(7));
+  assert.equal(valid.state.derivSessionSignalsRef.current, 0, "quote attempts do not exhaust the purchase limit");
+  assert.ok(valid.orders[0].matchCandidate);
+  assert.equal(typeof valid.orders[0].dbxGuardRequestedAt, "number");
+  const doc = read("../strategies/matches-dbx-v3-adaptatif.md");
+  assert.equal(parseAdvancedMatchStrategyMarkdown(doc.replace('"lossBudgetStakes": 4', '"lossBudgetStakes": 6')).lossBudgetStakes, 6);
+  assert.equal(dbxLastDigitStrategy.lossBudgetStakes, null, "V4 is unchanged");
+  assert.equal(dbxLastDigitStrategy.bypassPayoutFilter, true);
+});
+
+test("V3.1 buy gate rejects expired quotes, changed digits and depleted budget", () => {
+  const begin = page.indexOf("            if (autoQuote.dbxGuardRequestedAt !== undefined)");
+  const end = page.indexOf("            if (autoQuote.dbxLastDigit)", begin);
+  assert.ok(begin > 0 && end > begin);
+  for (const reason of ["valid", "expired", "digit", "payout", "budget", "strategy", "future", "market"]) {
+    const now = 1800000000000;
+    const ticks = mostly(reason === "digit" ? 3 : 7);
+    const context = vm.createContext({ Date: { now: () => now },
+      autoQuote: { dbxGuardRequestedAt: now - (reason === "expired" ? 3001 : reason === "future" ? -1 : 100), symbol: "1HZ50V", barrier: 7, matchCandidate: { digit: 7, probability: 0.3 } },
+      proposal: { ask_price: 5, payout: reason === "payout" ? 6 : 44.64 },
+      derivMatchStrategyRef: { current: reason === "strategy" ? dbxLastDigitStrategy : dbxDynamicMatchStrategy },
+      derivTicksRef: { current: ticks }, derivPipSizeRef: { current: 3 }, derivMarketRef: { current: reason === "market" ? "R_25" : "1HZ50V" },
+      derivSessionPnlRef: { current: reason === "budget" ? -20 : 0 }, derivStakeRef: { current: 5 },
+      buildMatchPrediction, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, setDerivAutoStatus() {}, stopDerivAutoOnPnlLimit() {} });
+    vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.accepted = check() === true;`, context);
+    assert.equal(context.accepted, reason === "valid", reason);
+  }
+});
+
+test("V3.1 stops on an unknown settlement profit instead of treating it as zero", () => {
+  const begin = page.indexOf("        if (isSold && profit === null");
+  const end = page.indexOf("        const ticksElapsed", begin);
+  assert.ok(begin > 0 && end > begin);
+  const halted = [];
+  const context = vm.createContext({ isSold: true, profit: null, openContract: { contract_id: 123 },
+    derivMatchContractIdsRef: { current: new Set([123]) }, derivMatchStrategyRef: { current: dbxDynamicMatchStrategy },
+    stopDerivAutoOnPnlLimit: (message) => halted.push(message) });
+  vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.continued = check() === true;`, context);
+  assert.equal(context.continued, false); assert.equal(halted.length, 1);
+  assert.match(halted[0], /résultat net manquant/);
 });

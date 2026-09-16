@@ -10,7 +10,7 @@ import { evaluateOverUnderQuote, getUnderEightTransitionState, type OverUnderCan
 import { buildRiseFallSignal, evaluateRiseFallQuote, type RiseFallSignal } from "@/lib/rise-fall-prediction";
 import { OverUnderPairPanel } from "@/components/over-under-pair-panel";
 import { OverUnderPairScanner, EMPTY_PAIR_STATS, pairBalanceAllows, type PairRow, type PairTrade, type PairStats } from "@/lib/over-under-pair";
-import { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildDbxMatchOrder, validDbxQuote } from "@/lib/dbx-matches";
+import { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, isDbxMode, buildDbxMatchOrder, validDbxQuote } from "@/lib/dbx-matches";
 import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, evaluateMatchQuote, isFastMatchMode, type MatchCandidate, type MatchStrategyRules } from "@/lib/match-prediction";
 import { DERIV_MARKETS, DERIV_MARKET_PIP_SIZES, isDerivMarketSymbol, type DerivMarketSymbol } from "@/lib/deriv-markets";
 
@@ -113,6 +113,7 @@ type DerivProposal = {
 type DerivPendingBuy = {
   dbx?: true;
   dbxLastDigit?: true;
+  dbxGuardRequestedAt?: number;
   pair?: boolean;
   contractType: DerivContractCode;
   barrier: DerivBarrier;
@@ -203,6 +204,7 @@ type DerivDigitAutoSignal = {
 };
 
 type ImportedMatchStrategy = {
+  lossBudgetStakes: number | null;
   executionMode: "statistical" | "dbx_fixed" | "dbx_dynamic" | "dbx_last_digit";
   name: string;
   contractType: "DIGITMATCH";
@@ -270,6 +272,7 @@ function getOverUnderStrategySummary(strategy: DerivOverUnderStrategy) {
 }
 
 const defaultImportedMatchStrategy: ImportedMatchStrategy = {
+  lossBudgetStakes: null,
   executionMode: "statistical",
   name: "Matches avancé",
   contractType: "DIGITMATCH",
@@ -303,6 +306,8 @@ const dbxMatchStrategy: ImportedMatchStrategy = {
 const dbxDynamicMatchStrategy: ImportedMatchStrategy = {
   ...dbxMatchStrategy,
   executionMode: "dbx_dynamic",
+  lossBudgetStakes: DBX_V3_GUARD.defaultLossBudgetStakes,
+  bypassPayoutFilter: false,
   name: DBX_DYNAMIC_MATCH_CONFIG.name,
   barrierMode: "dynamic",
   fixedDigit: null,
@@ -318,6 +323,8 @@ const dbxDynamicMatchStrategy: ImportedMatchStrategy = {
 const dbxLastDigitStrategy: ImportedMatchStrategy = {
   ...dbxDynamicMatchStrategy,
   executionMode: "dbx_last_digit",
+  lossBudgetStakes: null,
+  bypassPayoutFilter: true,
   name: DBX_LAST_DIGIT_CONFIG.name,
   rules: {
     ...dbxDynamicMatchStrategy.rules,
@@ -342,7 +349,9 @@ function parseAdvancedMatchStrategyMarkdown(markdown: string): ImportedMatchStra
   }
   if (data.executionMode === "dbx_fixed" || data.executionMode === "dbx_dynamic" || data.executionMode === "dbx_last_digit") {
     const profile = data.executionMode === "dbx_last_digit" ? dbxLastDigitStrategy : data.executionMode === "dbx_dynamic" ? dbxDynamicMatchStrategy : dbxMatchStrategy;
-    return { ...profile, stake: clampNumber(data.stake, DBX_MATCH_CONFIG.stake, 0.35, 10_000) };
+    const risk = typeof data.risk === "object" && data.risk !== null ? data.risk as Record<string, unknown> : {};
+    return { ...profile, stake: clampNumber(data.stake, DBX_MATCH_CONFIG.stake, 0.35, 10_000),
+      lossBudgetStakes: data.executionMode === "dbx_dynamic" ? clampNumber(risk.lossBudgetStakes, DBX_V3_GUARD.defaultLossBudgetStakes, 1, 100) : null };
   }
   const rulesData = typeof data.rules === "object" && data.rules !== null ? data.rules as Record<string, unknown> : {};
   const riskData = typeof data.risk === "object" && data.risk !== null ? data.risk as Record<string, unknown> : {};
@@ -356,6 +365,7 @@ function parseAdvancedMatchStrategyMarkdown(markdown: string): ImportedMatchStra
   const configuredMinimumProbability = rulesData.minimumProbability ?? data.frequencyThreshold;
   return {
     executionMode: "statistical",
+    lossBudgetStakes: null,
     name: typeof data.name === "string" && data.name.trim() ? data.name.trim() : defaultImportedMatchStrategy.name,
     contractType: "DIGITMATCH",
     barrierMode,
@@ -1290,6 +1300,29 @@ export default function Home() {
           if (!derivAutoRunningRef.current || !isDerivTradingStatus(derivStatusRef.current)) {
             setDerivAutoStatus("Proposition annulée par Stop");
           } else {
+            if (autoQuote.dbxGuardRequestedAt !== undefined) {
+              const active = derivMatchStrategyRef.current;
+              if (active.executionMode !== "dbx_dynamic" || derivMarketRef.current !== autoQuote.symbol
+                || Date.now() - autoQuote.dbxGuardRequestedAt < 0 || Date.now() - autoQuote.dbxGuardRequestedAt > DBX_V3_GUARD.quoteMaxAgeMs) {
+                setDerivAutoStatus("DBX V3.1 · cotation périmée ou stratégie modifiée · aucun achat");
+                return;
+              }
+              const current = buildMatchPrediction(derivTicksRef.current, derivPipSizeRef.current, null, active.rules).bestCandidate;
+              const quoted = autoQuote.matchCandidate;
+              if (!current || !quoted || current.digit !== autoQuote.barrier) {
+                setDerivAutoStatus("DBX V3.1 · digit sélectionné modifié pendant la cotation · aucun achat");
+                return;
+              }
+              const evaluation = evaluateDbxV3Quote({ ...current, probability: Math.min(current.probability, quoted.probability) }, derivTicksRef.current, derivPipSizeRef.current, proposal.ask_price, proposal.payout ?? 0);
+              if (!evaluation.accepted) {
+                setDerivAutoStatus(`DBX V3.1 · refus payout · seuil ${evaluation.breakEven === null ? "indisponible" : (evaluation.breakEven * 100).toFixed(2) + "%"} · estimation prudente ${(evaluation.conservativeProbability * 100).toFixed(2)}% · marge requise 2% de la mise`);
+                return;
+              }
+              if (!dbxV3BudgetAllows(derivSessionPnlRef.current, derivStakeRef.current, active.lossBudgetStakes ?? DBX_V3_GUARD.defaultLossBudgetStakes, proposal.ask_price)) {
+                stopDerivAutoOnPnlLimit("DBX V3.1 · budget de perte atteint : prochain achat annulé");
+                return;
+              }
+            }
             if (autoQuote.dbxLastDigit) {
               const current = buildMatchPrediction(derivTicksRef.current, derivPipSizeRef.current, null, derivMatchStrategyRef.current.rules);
               if (derivMarketRef.current !== autoQuote.symbol || current.bestCandidate?.digit !== autoQuote.barrier) {
@@ -1305,7 +1338,7 @@ export default function Home() {
               ? evaluateOverUnderQuote(autoQuote.overUnderCandidate, proposal.ask_price, proposal.payout ?? 0)
               : autoQuote.riseFallSignal
                 ? evaluateRiseFallQuote(autoQuote.riseFallSignal, proposal.ask_price, proposal.payout ?? 0)
-                : autoQuote.matchCandidate && !derivMatchStrategyRef.current.bypassPayoutFilter
+                : autoQuote.dbxGuardRequestedAt === undefined && autoQuote.matchCandidate && !derivMatchStrategyRef.current.bypassPayoutFilter
                   ? evaluateMatchQuote(autoQuote.matchCandidate, proposal.ask_price, proposal.payout ?? 0, derivMatchStrategyRef.current.rules)
                 : null;
             if (quoteEvaluation && !quoteEvaluation.accepted) {
@@ -1315,6 +1348,7 @@ export default function Home() {
               setDerivMessage(`Cotation ${formatDerivContract(autoQuote.contractType, autoQuote.barrier)} refusée · EV ${formatUsd(quoteEvaluation.expectedValue)}`);
               return;
             }
+            if (autoQuote.dbxGuardRequestedAt !== undefined) registerDerivSessionSignal();
             const buyReqId = ++derivReqIdRef.current;
             const pendingBuy = { dbx: autoQuote.dbx, dbxLastDigit: autoQuote.dbxLastDigit, contractType: autoQuote.contractType, barrier: autoQuote.barrier, stake: autoQuote.stake, symbol: autoQuote.symbol, duration: autoQuote.duration, batchIndex: autoQuote.batchIndex, batchTotal: autoQuote.batchTotal, overUnderCandidate: autoQuote.overUnderCandidate, riseFallSignal: autoQuote.riseFallSignal, matchCandidate: autoQuote.matchCandidate };
             derivPendingBuyRef.current = pendingBuy;
@@ -1413,6 +1447,11 @@ export default function Home() {
       if (typeof openContract?.contract_id === "number") {
         const isSold = openContract.is_sold === true || openContract.is_sold === 1 || openContract.status === "won" || openContract.status === "lost";
         const profit = toNumber(openContract.profit);
+        if (isSold && profit === null && derivMatchContractIdsRef.current.has(openContract.contract_id)
+          && derivMatchStrategyRef.current.executionMode === "dbx_dynamic") {
+          stopDerivAutoOnPnlLimit("DBX V3.1 · résultat net manquant : arrêt, reconnectez pour réconcilier le portefeuille");
+          return;
+        }
         const ticksElapsed = typeof openContract.tick_count === "number" ? openContract.tick_count : Array.isArray(openContract.tick_stream) ? openContract.tick_stream.length : 0;
         setDerivDeals((current) => current.map((deal) => deal.contractId !== openContract.contract_id ? deal : {
           ...deal,
@@ -1451,6 +1490,9 @@ export default function Home() {
             && activeMatchStrategy.stopLoss !== null
             && derivSessionPnlRef.current <= activeMatchStrategy.stopLoss
             && derivOpenContractsRef.current.size === 0;
+          const shouldStopForDbxBudget = wasMatchContract && activeMatchStrategy.executionMode === "dbx_dynamic"
+            && derivOpenContractsRef.current.size === 0
+            && !dbxV3BudgetAllows(derivSessionPnlRef.current, derivStakeRef.current, activeMatchStrategy.lossBudgetStakes ?? DBX_V3_GUARD.defaultLossBudgetStakes);
           if (derivAutoRunningRef.current && derivDoubleRiskEnabledRef.current) {
             derivDoubleRiskSeriesIndexRef.current += 1;
             setDerivDoubleRiskSeriesIndex(derivDoubleRiskSeriesIndexRef.current);
@@ -1502,6 +1544,7 @@ export default function Home() {
           socket.send(JSON.stringify({ balance: 1 }));
           if (shouldStopAfterSettlement) stopDerivAutoOnSignalLimit();
           if (shouldStopForTakeProfit) stopDerivAutoOnPnlLimit(`Take Profit atteint · +${formatUsd(derivSessionPnlRef.current)}`);
+          if (shouldStopForDbxBudget) stopDerivAutoOnPnlLimit("DBX V3.1 · budget de perte atteint · session arrêtée");
           if (shouldStopForStopLoss) stopDerivAutoOnPnlLimit(`Stop Loss atteint · ${formatUsd(derivSessionPnlRef.current)}`);
         } else {
           setDerivMessage(`Contrat #${openContract.contract_id} en cours · ${ticksElapsed} tick${ticksElapsed > 1 ? "s" : ""} reçu${ticksElapsed > 1 ? "s" : ""}`);
@@ -1688,6 +1731,17 @@ export default function Home() {
         return;
       }
       if (!derivPortfolioReadyRef.current || !currentTicks.length || !Number.isFinite(currentTicks.at(-1))) return;
+      const guarded = currentMatchStrategy.executionMode === "dbx_dynamic";
+      if (guarded) {
+        if (!dbxV3BudgetAllows(derivSessionPnlRef.current, derivStakeRef.current, currentMatchStrategy.lossBudgetStakes ?? DBX_V3_GUARD.defaultLossBudgetStakes)) {
+          stopDerivAutoOnPnlLimit("DBX V3.1 · budget de perte : la prochaine mise dépasserait la limite");
+          return;
+        }
+        if (currentTicks.length < DBX_V3_GUARD.minimumTicks) {
+          setDerivAutoStatus(`DBX V3.1 · contrôle prudent ${currentTicks.length}/${DBX_V3_GUARD.minimumTicks} ticks disponibles`);
+          return;
+        }
+      }
       const lastDigitMode = currentMatchStrategy.executionMode === "dbx_last_digit";
       const dynamic = currentMatchStrategy.executionMode !== "dbx_fixed";
       const prediction = dynamic ? buildMatchPrediction(currentTicks, derivPipSizeRef.current, null, currentMatchStrategy.rules) : null;
@@ -1707,9 +1761,9 @@ export default function Home() {
       }
       derivDigitBarrierRef.current = digit;
       setDerivDigitBarrier(digit);
-      registerDerivSessionSignal();
-      setDerivAutoStatus(`${lastDigitMode ? "DBX V4 · dernier digit confirmé dans le Top 2" : dynamic ? "DBX V3 · Top 2 adaptatif" : "DBX V2 · fixe"} · Matches digit ${digit} · 1 tick · mise fixe ${order.stake.toFixed(2)} ${derivCurrencyRef.current}`);
-      requestDerivAutoPosition(socket, lastDigitMode ? { ...order, dbxLastDigit: true } : order);
+      if (!guarded) registerDerivSessionSignal();
+      setDerivAutoStatus(`${lastDigitMode ? "DBX V4 · dernier digit confirmé dans le Top 2" : dynamic ? "DBX V3.1 · contrôle du payout" : "DBX V2 · fixe"} · Matches digit ${digit} · 1 tick · mise fixe ${order.stake.toFixed(2)} ${derivCurrencyRef.current}`);
+      requestDerivAutoPosition(socket, guarded ? { ...order, dbxGuardRequestedAt: Date.now(), matchCandidate: prediction!.bestCandidate! } : lastDigitMode ? { ...order, dbxLastDigit: true } : order);
       return;
     }
     const isMatchesDiffers = isMatchesDiffersContract(currentContractType);
@@ -2375,6 +2429,7 @@ export default function Home() {
 	      const derivMartingalePercent = Math.round((derivMartingaleMultiplier - 1) * 100);
 	      const isDbxMatch = derivContractType === "DIGITMATCH" && isDbxMode(matchStrategy.executionMode);
           const isDbxDynamic = isDbxMatch && matchStrategy.executionMode !== "dbx_fixed";
+          const isDbxGuarded = isDbxMatch && matchStrategy.executionMode === "dbx_dynamic";
           const isDbxLastDigit = isDbxMatch && matchStrategy.executionMode === "dbx_last_digit";
 	      const isPairedOverUnder = isMultiIndexOverUnder(derivOverUnderStrategy) && (derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER");
 	      const pairMode = derivOverUnderStrategy === "under8_transition" ? "under8_digit9" : "under5_over4";
@@ -2410,7 +2465,7 @@ export default function Home() {
 			                <span>Prochaine mise <b>{formatUsd(getMartingaleStake(derivBaseRiskStake, derivConsecutiveLosses, derivMartingaleEnabled, derivMartingaleMultiplier, derivMartingaleMaxStake, isOverUnderCategory ? derivOverUnderMartingaleCycles : null))}</b></span>
 			              </div>}
 			            </div>
-		            <div className="martingale-panel capital-protection-panel"><div className="martingale-toggle"><span><b>Suivi des pertes</b><small>Informatif: aucune coupure automatique. Utilisez Stop pour interrompre le bot.</small></span></div><div className="protection-status"><span>Pertes consécutives</span><b className={derivConsecutiveLosses > 0 ? "red" : ""}>{derivConsecutiveLosses}</b></div></div>
+		            <div className="martingale-panel capital-protection-panel"><div className="martingale-toggle"><span><b>Suivi des pertes</b><small>{isDbxGuarded ? "V3.1 : arrêt automatique selon le budget de perte configuré ci-dessous." : "Informatif: aucune coupure automatique. Utilisez Stop pour interrompre le bot."}</small></span></div><div className="protection-status"><span>Pertes consécutives</span><b className={derivConsecutiveLosses > 0 ? "red" : ""}>{derivConsecutiveLosses}</b></div></div>
 		            <div className={`martingale-panel ${derivTradePauseEnabled && !isMatchesDiffersContract(derivContractType) ? "enabled" : ""}`}><div className="martingale-toggle"><span><b>Pause entre trades</b><small>{isMatchesDiffersContract(derivContractType) ? "Ignorée pour Matches/Differs: le bot peut enchaîner dès qu’un signal est validé." : derivTradePauseEnabled ? "ON: le bot attend 8 ticks après chaque contrat." : "OFF: le bot peut enchaîner dès qu’un nouveau signal est validé."}</small></span><button type="button" className={`martingale-toggle-button ${derivTradePauseEnabled ? "enabled" : ""}`} onClick={() => setDerivTradePauseEnabled(!derivTradePauseEnabled)}>{derivTradePauseEnabled ? "ON" : "OFF"}</button></div><div className="protection-status"><span>Délai actuel</span><b>{isMatchesDiffersContract(derivContractType) ? "Aucun" : derivTradePauseEnabled ? "8 ticks" : "Aucun"}</b></div></div>
 		            <div className={`martingale-panel ${derivMultiplePositionsEnabled && derivContractType !== "DIGITMATCH" ? "enabled" : ""}`}><div className="martingale-toggle"><span><b>Positions par trade</b><small>{derivContractType === "DIGITMATCH" ? "Réglage séparé pour Matches disponible plus bas." : derivHalfBalanceRiskEnabled ? "Forcé à une seule position avec le risque 50% balance." : derivMultiplePositionsEnabled ? `ON: chaque signal ouvre ${derivPositionCount} positions.` : "OFF: chaque signal ouvre une seule position."}</small></span><button type="button" className={`martingale-toggle-button ${derivMultiplePositionsEnabled ? "enabled" : ""}`} disabled={derivAutoRunning || derivHalfBalanceRiskEnabled || derivContractType === "DIGITMATCH"} onClick={() => setDerivMultiplePositionsEnabled(!derivMultiplePositionsEnabled)}>{derivMultiplePositionsEnabled ? "ON" : "OFF"}</button></div>{derivMultiplePositionsEnabled && derivContractType !== "DIGITMATCH" && <div className="martingale-fields"><label>Nombre de positions<input type="number" min="2" max="10" step="1" disabled={derivAutoRunning} value={derivPositionCount} onChange={(event) => setDerivPositionCount(Math.min(10, Math.max(2, Math.trunc(Number(event.target.value) || 2))))}/></label><span>Par signal <b>{derivPositionCount} positions</b></span></div>}</div>
 		            <div className="contract-category-picker" role="group" aria-label="Catégorie de contrat">
@@ -2444,12 +2499,13 @@ export default function Home() {
 		              {derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : derivContractType === "CALL" || derivContractType === "PUT" ? <div className="direction-control contract-options"><button className="selected rise" disabled><ArrowUp/>Hausse auto</button><button className="selected fall" disabled><ArrowDown/>Baisse auto</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} disabled={derivAutoRunning} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
 	              <div className="auto-contract-summary"><span>Contrat automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "CALL" || derivContractType === "PUT" ? "Direction et durée automatiques" : derivContractType === "DIGITMATCH" ? `Matches ${derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : derivContractType.startsWith("DIGIT") ? `${derivContractLabels[derivContractType]} ${needsDigitBarrier(derivContractType) && derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : needsTouchBarrier(derivContractType) ? `${derivContractLabels[derivContractType]} dynamique` : formatDerivContract(derivContractType, null)}</b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <small>{derivOverUnderStrategies[derivOverUnderStrategy].description}</small> : derivContractType === "CALL" || derivContractType === "PUT" ? <small>Le modèle compare Hausse et Baisse sur 8, 21 et 55 ticks, puis contrôle le payout avant achat.</small> : derivContractType === "DIGITMATCH" ? <small>Le bot utilise la stratégie Matches importée ou le profil avancé par défaut, puis achète uniquement les signaux qualifiés.</small> : needsDigitBarrier(derivContractType) && <small>{derivAutoDigitBarrierMode === "fixed" ? `Le bot garde la barrière ${derivDigitBarrier} pour la série de trades.` : "Le bot choisit le digit au moment du signal."}</small>}{needsTouchBarrier(derivContractType) && <small>Le bot calcule une barrière relative selon la volatilité récente.</small>}</div>
 	              {derivContractType === "DIGITMATCH" && <label className="strategy-select">Liste des stratégies Matches<select aria-label="Stratégie Matches" value={matchStrategySelection} disabled={derivAutoRunning} onChange={(event) => selectMatchStrategy(event.target.value)}><option value="advanced">Matches avancé</option><option value="dbx">{DBX_MATCH_CONFIG.name}</option><option value="dbx_dynamic">{DBX_DYNAMIC_MATCH_CONFIG.name}</option><option value="dbx_last_digit">{DBX_LAST_DIGIT_CONFIG.name}</option>{importedMatchProfile && <option value="imported">{importedMatchProfile.name} (importée)</option>}</select></label>}
-              {derivContractType === "DIGITMATCH" && <div className="match-strategy-card"><div><span>Stratégie Matches</span><b>{matchStrategy.name}</b><small>{isDbxLastDigit ? "Dernier digit dans le Top 2 · 50 ticks · 1 contrat de 1 tick" : isDbxDynamic ? "Digit dynamique · Top 2 adaptatif · 50 ticks · 1 contrat de 1 tick" : isDbxMatch ? "Digit 1 fixe · 1 tick · Volatility 50 (1s) · sans filtre statistique" : matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Top 2 adaptatif · ${matchStrategy.rules.windowSize} ticks · 1 contrat` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `1er / 2e en alternance · ${matchStrategy.rules.windowSize} ticks · 1 contrat` : matchStrategy.rules.selectionMode === "frequency_window" ? `Fenêtre ${matchStrategy.rules.windowSize} ticks · seuil ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%` : `Min ${(matchStrategy.rules.minimumProbability * 100).toFixed(1)}% · edge +${(matchStrategy.rules.minimumEdge * 100).toFixed(1)}% · accord ${matchStrategy.rules.minimumAgreementScore}/5`}{matchStrategy.takeProfit !== null ? ` · TP ${formatUsd(matchStrategy.takeProfit)}` : ""}{matchStrategy.stopLoss !== null ? ` · SL ${formatUsd(matchStrategy.stopLoss)}` : ""}{matchStrategy.maxRecoverySteps > 0 ? ` · récup x${matchStrategy.recoveryMultiplier}` : ""}</small></div><label className="match-strategy-import"><Upload/> Importer .md<input type="file" accept=".md,text/markdown,text/plain" disabled={derivAutoRunning} onChange={importMatchStrategyFile}/></label>{matchStrategyImportStatus && <small>{matchStrategyImportStatus}</small>}</div>}
+              {isDbxGuarded && <div className="match-strategy-card"><label>Budget de perte session (nombre de mises)<input type="number" min="1" max="100" step="1" disabled={derivAutoRunning} value={matchStrategy.lossBudgetStakes ?? DBX_V3_GUARD.defaultLossBudgetStakes} onChange={(event) => { const value = clampNumber(event.target.value, DBX_V3_GUARD.defaultLossBudgetStakes, 1, 100); const next = { ...matchStrategy, lossBudgetStakes: value }; derivMatchStrategyRef.current = next; setMatchStrategy(next); }}/></label><small>Budget : {((matchStrategy.lossBudgetStakes ?? DBX_V3_GUARD.defaultLossBudgetStakes) * derivStake).toFixed(2)} {derivCurrency}. Le bot réserve la prochaine mise avant achat et s’arrête si elle peut dépasser cette perte nette. Le budget repart au prochain Play.</small></div>}
+              {derivContractType === "DIGITMATCH" && <div className="match-strategy-card"><div><span>Stratégie Matches</span><b>{matchStrategy.name}</b><small>{isDbxLastDigit ? "Dernier digit dans le Top 2 · 50 ticks · 1 contrat de 1 tick" : isDbxGuarded ? "Top 2 sur 50 ticks · vérification prudente sur 200 · payout contrôlé" : isDbxMatch ? "Digit 1 fixe · 1 tick · Volatility 50 (1s) · sans filtre statistique" : matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Top 2 adaptatif · ${matchStrategy.rules.windowSize} ticks · 1 contrat` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `1er / 2e en alternance · ${matchStrategy.rules.windowSize} ticks · 1 contrat` : matchStrategy.rules.selectionMode === "frequency_window" ? `Fenêtre ${matchStrategy.rules.windowSize} ticks · seuil ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%` : `Min ${(matchStrategy.rules.minimumProbability * 100).toFixed(1)}% · edge +${(matchStrategy.rules.minimumEdge * 100).toFixed(1)}% · accord ${matchStrategy.rules.minimumAgreementScore}/5`}{matchStrategy.takeProfit !== null ? ` · TP ${formatUsd(matchStrategy.takeProfit)}` : ""}{matchStrategy.stopLoss !== null ? ` · SL ${formatUsd(matchStrategy.stopLoss)}` : ""}{matchStrategy.maxRecoverySteps > 0 ? ` · récup x${matchStrategy.recoveryMultiplier}` : ""}</small></div><label className="match-strategy-import"><Upload/> Importer .md<input type="file" accept=".md,text/markdown,text/plain" disabled={derivAutoRunning} onChange={importMatchStrategyFile}/></label>{matchStrategyImportStatus && <small>{matchStrategyImportStatus}</small>}</div>}
 		              {!isDbxMatch && needsDigitBarrier(derivContractType) && derivContractType !== "DIGITOVER" && derivContractType !== "DIGITUNDER" && <div className="contract-category-picker auto-barrier-mode" role="group" aria-label="Mode de barrière automatique"><span>Barrière en full automatique</span><button disabled={derivAutoRunning} className={derivAutoDigitBarrierMode === "dynamic" ? "selected" : ""} onClick={() => setDerivAutoDigitBarrierMode("dynamic")}>Dynamique</button><button disabled={derivAutoRunning} className={derivAutoDigitBarrierMode === "fixed" ? "selected" : ""} onClick={() => setDerivAutoDigitBarrierMode("fixed")}>Digit fixe</button><small>{derivAutoDigitBarrierMode === "fixed" ? `Tous les prochains trades ${derivContractLabels[derivContractType]} utiliseront la barrière ${derivDigitBarrier}.` : "L’IA adapte la barrière selon les ticks récents."}</small></div>}
 	              {derivContractType === "DIGITMATCH" && <div className="martingale-panel enabled"><div className="martingale-toggle"><span><b>Contrats Matches</b><small>Nombre de contrats à prendre à chaque signal qualifié.</small></span></div><div className="martingale-fields"><label>Nombre de contrats<input type="number" min="1" max="10" step="1" disabled={derivAutoRunning || isDbxMatch} value={derivMatchPositionCount} onChange={(event) => setDerivMatchPositionCount(Math.min(10, Math.max(1, Math.trunc(Number(event.target.value) || 1))))}/></label><span>Par signal <b>{derivMatchPositionCount} contrat{derivMatchPositionCount > 1 ? "s" : ""}</b></span></div></div>}
 	              <div className={`martingale-panel ${derivMaxSignals > 0 ? "enabled" : ""}`}><div className="martingale-toggle"><span><b>Limite signaux session</b><small>{derivMaxSignals > 0 ? `Stop automatique après ${derivMaxSignals} signal${derivMaxSignals > 1 ? "s" : ""}.` : "Illimité: le bot continue jusqu’au Stop manuel."}</small></span></div><div className="martingale-fields"><label>Nombre de signaux<input type="number" min="0" max="1000" step="1" disabled={derivAutoRunning} value={derivMaxSignals} onChange={(event) => setDerivMaxSignals(Math.min(1000, Math.max(0, Math.trunc(Number(event.target.value) || 0))))}/></label><span>Session <b>{derivMaxSignals > 0 ? `${derivSessionSignals}/${derivMaxSignals}` : "Illimité"}</b></span></div></div>
 	              {!isDbxMatch && needsDigitBarrier(derivContractType) && derivContractType !== "DIGITOVER" && derivContractType !== "DIGITUNDER" && derivAutoDigitBarrierMode === "fixed" && <div className="digit-barrier auto-fixed-barrier"><label>Digit / barrière fixe<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" disabled={derivAutoRunning} value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection du digit fixe">{selectedContractBarrierOptions.map((digit) => <button key={digit} disabled={derivAutoRunning} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
-		              {derivContractType.startsWith("DIGIT") ? <div className="strategy-select auto-digit-strategy"><span>Stratégie automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "DIGITMATCH" ? matchStrategy.name : "Filtre statistique des derniers chiffres"}</b><small>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? `${getOverUnderStrategySummary(derivOverUnderStrategy)} · ${derivOverUnderStrategies[derivOverUnderStrategy].description}` : derivContractType === "DIGITMATCH" ? isDbxLastDigit ? "DBX V4 classe les digits sur les 50 derniers ticks et attend que le dernier digit reçu soit le premier ou le deuxième plus fréquent. Elle achète Matches sur ce même digit, après nouvelle vérification à réception de la cotation. Ce déclencheur ne garantit pas le prochain résultat." : isDbxDynamic ? "DBX V3 choisit parmi les deux digits les plus fréquents sur 50 ticks, en comparant fréquence, récence et transitions. Le choix est recalculé avant chaque contrat ; il peut rester identique si les données le favorisent. Mise constante, aucune rentabilité garantie." : isDbxMatch ? "Répète Matches sur le digit 1 après chaque clôture, avec la mise saisie (5 par défaut). Martingale et multiplicateurs ignorés, comme le montant fixe du XML. La limite de session du bot reste applicable." : matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Choisit entre les deux chiffres les plus fréquents sur ${matchStrategy.rules.windowSize} ticks, sans alternance forcée. Compare fréquence, récence et transitions sur les résultats passés ; estimation non garantie.` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `Alterne entre le premier et le deuxième chiffre les plus fréquents des ${matchStrategy.rules.windowSize} derniers ticks. Un contrat à la fois ; les fréquences passées ne sont pas des probabilités de gain.` : matchStrategy.rules.selectionMode === "frequency_window" ? `Prend uniquement DIGITMATCH sur le digit le plus fréquent des ${matchStrategy.rules.windowSize} derniers ticks si sa fréquence atteint ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%.` : "Sélectionne un digit dynamique seulement quand les fenêtres statistiques, le contexte et le payout confirment une Edge positive." : derivContractType === "DIGITDIFF" ? "Differs: le bot sélectionne un digit sous-représenté pour réduire le risque de sortie identique." : "Le bot adapte la barrière selon la distribution récente des derniers chiffres."}</small></div> : <label className="strategy-select">Stratégie automatique<select value={derivStrategy} disabled={derivAutoRunning} onChange={(event) => { const strategy = event.target.value as DerivStrategy; derivStrategyRef.current = strategy; setDerivStrategy(strategy); }}><option value="trend">Tendance multi-horizon</option><option value="momentum">Impulsion filtrée</option><option value="reversal">Retournement confirmé</option></select><small>{derivStrategies[derivStrategy].description}</small></label>}
+		              {derivContractType.startsWith("DIGIT") ? <div className="strategy-select auto-digit-strategy"><span>Stratégie automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "DIGITMATCH" ? matchStrategy.name : "Filtre statistique des derniers chiffres"}</b><small>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? `${getOverUnderStrategySummary(derivOverUnderStrategy)} · ${derivOverUnderStrategies[derivOverUnderStrategy].description}` : derivContractType === "DIGITMATCH" ? isDbxLastDigit ? "DBX V4 classe les digits sur les 50 derniers ticks et attend que le dernier digit reçu soit le premier ou le deuxième plus fréquent. Elle achète Matches sur ce même digit, après nouvelle vérification à réception de la cotation. Ce déclencheur ne garantit pas le prochain résultat." : isDbxDynamic ? "DBX V3.1 conserve le choix adaptatif sur 50 ticks, mais exige une marge prudente de 2 % de la mise au payout proposé, avec 200 ticks de contrôle. Cotations périmées ou digit modifié : achat annulé. Le filtre peut rester en attente longtemps ; il ne prouve pas une rentabilité future." : isDbxMatch ? "Répète Matches sur le digit 1 après chaque clôture, avec la mise saisie (5 par défaut). Martingale et multiplicateurs ignorés, comme le montant fixe du XML. La limite de session du bot reste applicable." : matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Choisit entre les deux chiffres les plus fréquents sur ${matchStrategy.rules.windowSize} ticks, sans alternance forcée. Compare fréquence, récence et transitions sur les résultats passés ; estimation non garantie.` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `Alterne entre le premier et le deuxième chiffre les plus fréquents des ${matchStrategy.rules.windowSize} derniers ticks. Un contrat à la fois ; les fréquences passées ne sont pas des probabilités de gain.` : matchStrategy.rules.selectionMode === "frequency_window" ? `Prend uniquement DIGITMATCH sur le digit le plus fréquent des ${matchStrategy.rules.windowSize} derniers ticks si sa fréquence atteint ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%.` : "Sélectionne un digit dynamique seulement quand les fenêtres statistiques, le contexte et le payout confirment une Edge positive." : derivContractType === "DIGITDIFF" ? "Differs: le bot sélectionne un digit sous-représenté pour réduire le risque de sortie identique." : "Le bot adapte la barrière selon la distribution récente des derniers chiffres."}</small></div> : <label className="strategy-select">Stratégie automatique<select value={derivStrategy} disabled={derivAutoRunning} onChange={(event) => { const strategy = event.target.value as DerivStrategy; derivStrategyRef.current = strategy; setDerivStrategy(strategy); }}><option value="trend">Tendance multi-horizon</option><option value="momentum">Impulsion filtrée</option><option value="reversal">Retournement confirmé</option></select><small>{derivStrategies[derivStrategy].description}</small></label>}
 	              <div className="ticket-fields auto-fields">{!isPairedOverUnder && <label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise fixe (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivAutoRunning || derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); }}/></label>}<div className="auto-duration"><span>{isPairedOverUnder || isDbxMatch ? "Durée par contrat" : "Durée adaptative"}</span>{isDbxMatch ? <><b>1 tick <small>FIXE</small></b><p>{isDbxDynamic ? "Matches digit dynamique" : "Matches digit 1"} · un contrat à la fois.</p></> : isPairedOverUnder ? <><b>1 tick <small>FIXE</small></b><p>Deux contrats sur deux indices distincts.</p></> : derivContractType === "CALL" || derivContractType === "PUT" ? <><b>2 à 5 ticks <small>SIGNAL</small></b><p>Choisie selon la persistance ou l’accélération détectée.</p></> : <><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
 	              <div className="auto-execution-status"><span className={derivAutoRunning ? "running" : ""}/><div><b>{derivAutoRunning ? "BOT EN MARCHE" : "BOT EN PAUSE"}</b><small>{derivAutoStatus}</small></div></div>
               <div className="auto-actions"><Button className="auto-play" disabled={derivAutoRunning || !derivTradeConnected} onClick={startDerivAuto}><Play/> Play</Button><Button className="auto-stop" disabled={!derivAutoRunning} onClick={stopDerivAuto}><Square/> Stop</Button></div>
@@ -2552,6 +2608,7 @@ export default function Home() {
         ticks={derivTicks}
         selectedDigit={derivDigitBarrier}
         strategyRules={matchStrategy.rules}
+        quoteGuard={matchStrategy.executionMode === "dbx_dynamic" ? { minimumTicks: DBX_V3_GUARD.minimumTicks, status: derivAutoStatus } : undefined}
         onClose={() => setMatchPredictionOpen(false)}
         onOpen={() => setMatchPredictionOpen(true)}
         onSelectDigit={changeDerivDigitBarrier}
