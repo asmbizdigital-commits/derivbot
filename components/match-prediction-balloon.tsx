@@ -24,6 +24,10 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
   const [position, setPosition] = useState<BalloonPosition>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; left: number; top: number } | null>(null);
   const liveTicks = useMemo(() => ticks.slice(-1000), [ticks]);
+  const lastPrice = liveTicks.at(-1);
+  const lastQuote = lastPrice !== undefined && Number.isFinite(lastPrice) && Math.abs(lastPrice) < 1e21
+    && Number.isInteger(pipSize) && pipSize >= 0 && pipSize <= 20 ? lastPrice.toFixed(pipSize) : null;
+  const lastDigit = lastQuote?.at(-1) ?? null;
   const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, null, strategyRules), [pipSize, liveTicks, strategyRules]);
   const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability), [prediction.candidates]);
   const candidate = prediction.bestCandidate ?? rankedCandidates[0] ?? null;
@@ -84,7 +88,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
         <div><small>{adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
 
-      <div className="match-refresh-status"><Clock3/><span>Estimation en direct</span><b>LIVE</b></div>
+      <div className="match-refresh-status match-last-tick" aria-live="polite" aria-atomic="true"><Clock3/><span>Dernier digit reçu <small>{lastQuote === null ? "En attente de tick" : `Dernier tick : ${lastQuote}`}</small></span><b aria-label={`Dernier digit reçu : ${lastDigit ?? "indisponible"}`}>{lastDigit ?? "—"}</b></div>
 
       {candidate && <div className="match-model-grid">
         <span><small>{adaptive ? "RÉCENT 20" : "COURT 50"}</small><b>{(candidate.shortProbability * 100).toFixed(1)}%</b></span>

@@ -63,3 +63,5 @@
 .pair-results > span { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; color: var(--muted); }
 .pair-results b { color: #f3f6ee; font-size: 18px; }
 .pair-scanner summary { cursor: pointer; padding: 8px 0; }
+
+.match-last-tick{height:auto;min-height:44px;padding:7px 10px}.match-last-tick>span{display:flex;flex-direction:column;gap:3px}.match-last-tick small{font-size:7px;color:#89948e;font-variant-numeric:tabular-nums}.match-last-tick>b{font-size:24px;line-height:1;font-variant-numeric:tabular-nums}
