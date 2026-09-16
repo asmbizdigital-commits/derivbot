@@ -14,8 +14,13 @@ export const DBX_DYNAMIC_MATCH_CONFIG = {
   windowSize: 50,
 } as const;
 
+export const DBX_LAST_DIGIT_CONFIG = {
+  name: "DBX (V4) Last Digit + Most Appearing",
+  windowSize: 50,
+} as const;
+
 export function isDbxMode(mode: string) {
-  return mode === "dbx_fixed" || mode === "dbx_dynamic";
+  return mode === "dbx_fixed" || mode === "dbx_dynamic" || mode === "dbx_last_digit";
 }
 
 export function buildDbxMatchOrder(stake: number, digit: number = DBX_MATCH_CONFIG.barrier) {

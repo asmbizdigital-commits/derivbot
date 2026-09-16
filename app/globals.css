@@ -65,3 +65,5 @@
 .pair-scanner summary { cursor: pointer; padding: 8px 0; }
 
 .match-last-tick{height:auto;min-height:44px;padding:7px 10px}.match-last-tick>span{display:flex;flex-direction:column;gap:3px}.match-last-tick small{font-size:7px;color:#89948e;font-variant-numeric:tabular-nums}.match-last-tick>b{font-size:24px;line-height:1;font-variant-numeric:tabular-nums}
+
+.match-top-two-observed{grid-template-columns:repeat(2,minmax(0,1fr))}

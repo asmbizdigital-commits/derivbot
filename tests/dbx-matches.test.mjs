@@ -12,8 +12,8 @@ const importer = page.slice(page.indexOf("const defaultImportedMatchStrategy:"),
 const runner = page.slice(page.indexOf("  function maybeRunDerivAuto("), page.indexOf("  function requestDerivOverUnderQuoteScan("));
 const selection = page.slice(page.indexOf("  function selectMatchStrategy("), page.indexOf("  async function importMatchStrategyFile("));
 const helpers = vm.createContext({});
-vm.runInContext(ts.transpileModule(config + prediction + importer + "\nglobalThis.api = { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, helpers);
-const { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy } = helpers.api;
+vm.runInContext(ts.transpileModule(config + prediction + importer + "\nglobalThis.api = { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, helpers);
+const { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy } = helpers.api;
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("importable DBX profile reflects fixed XML trade options without a statistical entry", () => {
@@ -35,18 +35,19 @@ test("fixed stake remains configurable; invalid stakes and quotes cannot buy", (
 });
 
 function harness(dynamic = false) {
+  const lastMode = dynamic === "last";
   const refs = {
     derivModeRef: "auto", derivAutoRunningRef: true, derivStatusRef: "demo",
     derivOpenContractsRef: new Set(), derivAutoQuoteRef: new Map(), derivPendingBuysRef: new Map(), derivOverUnderQuoteScanRef: null,
     derivMaxSignalsRef: 200, derivSessionSignalsRef: 0, derivContractTypeRef: "DIGITMATCH",
-    derivPipSizeRef: 3, derivMatchStrategyRef: dynamic ? dbxDynamicMatchStrategy : dbxMatchStrategy, derivSessionPnlRef: 0, derivMarketRef: "1HZ50V",
+    derivPipSizeRef: 3, derivMatchStrategyRef: lastMode ? dbxLastDigitStrategy : dynamic ? dbxDynamicMatchStrategy : dbxMatchStrategy, derivSessionPnlRef: 0, derivMarketRef: "1HZ50V",
     derivPortfolioReadyRef: true, derivStakeRef: 5, derivBalanceRef: 100, derivCurrencyRef: "USD",
     derivAutoDigitBarrierModeRef: "dynamic", derivMatchPositionCountRef: 5, derivDigitBarrierRef: 7,
     derivMartingaleEnabledRef: true, derivDoubleRiskEnabledRef: true, derivHalfBalanceRiskEnabledRef: true,
   };
   const state = Object.fromEntries(Object.entries(refs).map(([key, current]) => [key, { current }]));
   const orders = [], statuses = [], selected = [];
-  const context = vm.createContext({ ...state, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, isDbxMode, buildMatchPrediction, dbxMatchStrategy, dbxDynamicMatchStrategy, defaultImportedMatchStrategy: {}, importedMatchProfile: null, buildDbxMatchOrder,
+  const context = vm.createContext({ ...state, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, isDbxMode, buildMatchPrediction, dbxMatchStrategy, dbxDynamicMatchStrategy, dbxLastDigitStrategy, defaultImportedMatchStrategy: {}, importedMatchProfile: null, buildDbxMatchOrder,
     isDerivTradingStatus: (status) => status === "demo", pairBalanceAllows: (cost, balance) => balance >= cost,
     setDerivAutoStatus: (text) => statuses.push(text),
     stopDerivAutoOnSignalLimit: () => { state.derivAutoRunningRef.current = false; },
@@ -58,7 +59,7 @@ function harness(dynamic = false) {
     ...Object.fromEntries(["setMatchStrategy", "setMatchStrategySelection", "setDerivMode", "setDerivContractCategory", "setDerivContractType", "setDerivAutoDigitBarrierMode", "setDerivMatchPositionCount", "setDerivDigitBarrier", "setDerivStake", "setDerivMartingaleEnabled", "setDerivDoubleRiskEnabled", "setDerivHalfBalanceRiskEnabled", "setMatchPredictionOpen", "setMatchStrategyImportStatus"].map((name) => [name, (value) => selected.push([name, value])])),
   });
   vm.runInContext(ts.transpileModule(runner + selection + "\nglobalThis.run = maybeRunDerivAuto; globalThis.select = selectMatchStrategy;", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
-  return { state, orders, statuses, selected, run: (ticks = [100.007]) => context.run(ticks, {}), select: () => context.select(dynamic ? "dbx_dynamic" : "dbx") };
+  return { state, orders, statuses, selected, run: (ticks = [100.007]) => context.run(ticks, {}), select: () => context.select(lastMode ? "dbx_last_digit" : dynamic ? "dbx_dynamic" : "dbx") };
 }
 
 test("DBX execution skips statistical filters and ignores risk multipliers after losses", () => {
@@ -112,7 +113,7 @@ test("strategy selector exposes DBX and its fixed stake can be edited before Pla
   const stake = nodes.find((node) => ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === "input" && node.getText(ast).includes("value={derivStake}") && node.getText(ast).includes("derivDoubleRiskSeriesIndexRef"));
   assert.ok(selector); assert.ok(stake);
   const selected = [];
-  const context = vm.createContext({ React, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, matchStrategySelection: "dbx", derivAutoRunning: false,
+  const context = vm.createContext({ React, DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, matchStrategySelection: "dbx", derivAutoRunning: false,
     importedMatchProfile: null, selectMatchStrategy: (value) => selected.push(value),
     isDbxMatch: true, derivHalfBalanceRiskEnabled: false, derivStake: 5 });
   vm.runInContext(ts.transpileModule(`globalThis.selector = (${selector.getText(ast)}); globalThis.stake = (${stake.getText(ast)});`, {
@@ -120,6 +121,7 @@ test("strategy selector exposes DBX and its fixed stake can be edited before Pla
   }).outputText, context);
   assert.match(renderToStaticMarkup(context.selector), /DBX \(V2\) Pro/);
   assert.match(renderToStaticMarkup(context.selector), /DBX \(V3\) Adaptatif/);
+  assert.match(renderToStaticMarkup(context.selector), /DBX \(V4\) Last Digit/);
   context.selector.props.onChange({ target: { value: "dbx" } });
   assert.deepEqual(selected, ["dbx"]);
   assert.equal(context.stake.props.disabled, false);
@@ -183,4 +185,56 @@ test("V3 selection prepares dynamic settings without starting or enabling multip
   assert.equal(h.state.derivAutoRunningRef.current, false);
   assert.ok(h.selected.some(([name, value]) => name === "setMatchStrategySelection" && value === "dbx_dynamic"));
   assert.equal(h.orders.length, 0);
+});
+
+const lastWindow = (last) => prices([...Array(30).fill(7), ...Array(19).fill(3), last]);
+
+test("V4 import and selection preserve separate names and require last-digit Top 2", () => {
+  const profile = parseAdvancedMatchStrategyMarkdown(read("../strategies/matches-dbx-v4-last-digit-most-appearing.md"));
+  assert.equal(profile.name, DBX_LAST_DIGIT_CONFIG.name);
+  assert.equal(profile.executionMode, "dbx_last_digit");
+  assert.equal(profile.rules.selectionMode, "last_digit_top_two");
+  assert.equal(profile.fixedDigit, null); assert.equal(profile.rules.minimumTicks, 50);
+  const h = harness("last"); h.state.derivAutoRunningRef.current = false; h.select();
+  assert.equal(h.state.derivMatchStrategyRef.current.executionMode, "dbx_last_digit");
+  assert.equal(h.orders.length, 0);
+  assert.ok(h.selected.some(([name, value]) => name === "setMatchStrategySelection" && value === "dbx_last_digit"));
+});
+
+test("V4 waits outside Top 2 and matches the last digit, including second rank", () => {
+  const h = harness("last");
+  h.run(lastWindow(3).slice(1)); assert.equal(h.orders.length, 0);
+  h.run(lastWindow(9)); assert.equal(h.orders.length, 0);
+  assert.match(h.statuses.at(-1), /dernier digit 9.*7 \/ 3/);
+  h.run(lastWindow(3)); assert.equal(h.orders[0].barrier, 3);
+  assert.equal(h.orders[0].dbxLastDigit, true);
+  h.run(lastWindow(7)); assert.equal(h.orders.length, 1, "no overlap during quotes");
+  h.state.derivAutoQuoteRef.current.clear(); h.run(lastWindow(7));
+  assert.equal(h.orders[1].barrier, 7); assert.equal(h.orders[1].stake, 5);
+});
+
+test("V4 uses a rolling window, deterministic ties and terminal zeros", () => {
+  const rules = dbxLastDigitStrategy.rules;
+  const ties = prices([...Array(10).fill(7), ...Array(10).fill(3), ...Array(10).fill(1), ...Array(19).fill(2), 1]);
+  const selected = buildMatchPrediction(ties, 3, 7, rules);
+  assert.equal(selected.bestCandidate.digit, 1, "last digit rule overrides a fixed preference");
+  const tiedUniform = prices([...Array.from({ length: 49 }, (_, i) => i % 10), 9]);
+  assert.equal(buildMatchPrediction(tiedUniform, 3, null, rules).bestCandidate, null, "tie chooses digits 0 and 1");
+  const zeros = prices([...Array(30).fill(7), ...Array(19).fill(0), 0]);
+  assert.equal(buildMatchPrediction(zeros, 3, null, rules).bestCandidate.digit, 0);
+  assert.equal(buildMatchPrediction([...prices(Array(100).fill(9)), ...zeros], 3, null, rules).bestCandidate.digit, 0);
+  assert.equal(buildMatchPrediction([NaN, ...zeros.slice(1)], 3, null, rules).bestCandidate, null);
+});
+
+test("V4 quote acceptance rechecks the current last digit and its Top 2 membership", () => {
+  const begin = page.indexOf("            if (autoQuote.dbxLastDigit)");
+  const end = page.indexOf("            if (autoQuote.dbx &&", begin);
+  assert.ok(begin > 0 && end > begin);
+  for (const [ticks, market, accepted] of [[lastWindow(3), "1HZ50V", true], [lastWindow(9), "1HZ50V", false], [prices([...Array(25).fill(7), ...Array(24).fill(2), 3]), "1HZ50V", false], [lastWindow(7), "1HZ50V", false], [lastWindow(3), "R_25", false], [prices([...Array(49).fill(7), 3]), "1HZ50V", true], [[], "1HZ50V", false]]) {
+    const context = vm.createContext({ autoQuote: { dbxLastDigit: true, barrier: 3, symbol: "1HZ50V" }, buildMatchPrediction,
+      derivTicksRef: { current: ticks }, derivPipSizeRef: { current: 3 }, derivMatchStrategyRef: { current: dbxLastDigitStrategy },
+      derivMarketRef: { current: market }, setDerivAutoStatus() {} });
+    vm.runInContext(`function check() { ${page.slice(begin, end)} return true; } globalThis.accepted = check() === true;`, context);
+    assert.equal(context.accepted, accepted);
+  }
 });

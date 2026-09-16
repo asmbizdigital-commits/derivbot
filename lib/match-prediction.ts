@@ -22,7 +22,7 @@ export type MatchPrediction = {
   validationSamples?: number;
 };
 
-export type MatchSelectionMode = "advanced_probability" | "most_appearing_1000" | "frequency_window" | "top_two_frequency" | "top_two_adaptive";
+export type MatchSelectionMode = "last_digit_top_two" | "advanced_probability" | "most_appearing_1000" | "frequency_window" | "top_two_frequency" | "top_two_adaptive";
 
 export function isFastMatchMode(mode: MatchSelectionMode) {
   return mode === "top_two_frequency" || mode === "top_two_adaptive";
@@ -151,7 +151,7 @@ export function buildMatchPrediction(ticks: number[], pipSize: number, preferred
 
   if (rules.selectionMode === "top_two_adaptive") return buildAdaptiveMatchPrediction(digits, preferredDigit, rules);
 
-  if (rules.selectionMode === "frequency_window" || rules.selectionMode === "top_two_frequency") {
+  if (rules.selectionMode === "frequency_window" || rules.selectionMode === "top_two_frequency" || rules.selectionMode === "last_digit_top_two") {
     const windowSize = Math.max(1, Math.min(1000, Math.trunc(rules.windowSize)));
     const sample = digits.slice(-windowSize);
     const counts = Array.from({ length: 10 }, () => 0);
@@ -162,13 +162,16 @@ export function buildMatchPrediction(ticks: number[], pipSize: number, preferred
     const top = ranked[0];
     const runnerUp = ranked[1] ?? { digit: top.digit, count: 0, probability: 0 };
     const alternatingRank = rules.selectionMode === "top_two_frequency" ? Math.max(0, Math.trunc(completedContracts)) % 2 : 0;
-    const targetDigit = preferredDigit ?? ranked[alternatingRank].digit;
+    const lastDigitMode = rules.selectionMode === "last_digit_top_two";
+    const targetDigit = lastDigitMode ? digits.at(-1)! : preferredDigit ?? ranked[alternatingRank].digit;
+    const lastDigitInTopTwo = ranked.slice(0, 2).some((item) => item.digit === targetDigit);
     const candidates = counts.map((count, digit) => {
       const probability = sample.length ? count / sample.length : 0;
       const dominanceGap = digit === top.digit ? probability - runnerUp.probability : probability - top.probability;
       const selectedDigit = digit === targetDigit;
       const stable = sample.length >= rules.minimumTicks
         && selectedDigit
+        && (!lastDigitMode || lastDigitInTopTwo)
         && probability >= rules.minimumProbability;
       return {
         digit,

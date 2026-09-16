@@ -29,10 +29,14 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
     && Number.isInteger(pipSize) && pipSize >= 0 && pipSize <= 20 ? lastPrice.toFixed(pipSize) : null;
   const lastDigit = lastQuote?.at(-1) ?? null;
   const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, null, strategyRules), [pipSize, liveTicks, strategyRules]);
-  const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability), [prediction.candidates]);
-  const candidate = prediction.bestCandidate ?? rankedCandidates[0] ?? null;
+  const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability || left.digit - right.digit), [prediction.candidates]);
+  const lastDigitMode = strategyRules.selectionMode === "last_digit_top_two";
+  const candidate = prediction.bestCandidate ?? (lastDigitMode ? null : rankedCandidates[0] ?? null);
+  const topTwo = rankedCandidates.slice(0, 2);
   const adaptive = strategyRules.selectionMode === "top_two_adaptive";
-  const predictionStatus = adaptive
+  const predictionStatus = lastDigitMode
+    ? !prediction.ready ? `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés` : candidate ? `Dernier digit ${lastDigit} confirmé dans le Top 2` : `Attente : dernier digit ${lastDigit ?? "—"} hors Top 2`
+    : adaptive
     ? prediction.ready ? `Choix top 2 · ${prediction.validationSamples ?? 0} prévisions passées comparées` : `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés`
     : prediction.bestCandidate
     ? `Signal qualifié · accord ${prediction.bestCandidate.agreementScore}/5`
@@ -84,26 +88,29 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
       </div>
 
       <div className="match-prediction-hero" aria-live="polite">
-        <span><small>DIGIT ESTIMÉ</small><strong>{candidate?.digit ?? "-"}</strong></span>
-        <div><small>{adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
+        <span><small>{lastDigitMode ? "DIGIT À MATCHER" : "DIGIT ESTIMÉ"}</small><strong>{candidate?.digit ?? "-"}</strong></span>
+        <div><small>{lastDigitMode ? "FRÉQUENCE OBSERVÉE" : adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
 
       <div className="match-refresh-status match-last-tick" aria-live="polite" aria-atomic="true"><Clock3/><span>Dernier digit reçu <small>{lastQuote === null ? "En attente de tick" : `Dernier tick : ${lastQuote}`}</small></span><b aria-label={`Dernier digit reçu : ${lastDigit ?? "indisponible"}`}>{lastDigit ?? "—"}</b></div>
 
-      {candidate && <div className="match-model-grid">
+      {lastDigitMode && <div className="match-model-grid match-top-two-observed" aria-label="Les deux digits les plus fréquents">
+        {topTwo.map((item, index) => <span key={item.digit}><small>MOST APPEARING #{index + 1}</small><b>{item.digit} · {(item.probability * 100).toFixed(1)}%</b></span>)}
+      </div>}
+      {candidate && !lastDigitMode && <div className="match-model-grid">
         <span><small>{adaptive ? "RÉCENT 20" : "COURT 50"}</small><b>{(candidate.shortProbability * 100).toFixed(1)}%</b></span>
         <span><small>{adaptive ? `LISSÉ ${strategyRules.windowSize}` : "MOYEN 160"}</small><b>{(candidate.mediumProbability * 100).toFixed(1)}%</b></span>
         <span><small>{adaptive ? "FRÉQUENCE OBSERVÉE" : "LONG 500"}</small><b>{((adaptive ? candidate.observedFrequency ?? 0 : candidate.longProbability) * 100).toFixed(1)}%</b></span>
         <span><small>TRANSITION</small><b>{(candidate.transitionProbability * 100).toFixed(1)}%</b></span>
       </div>}
 
-      <div className="match-candidate-grid" role="group" aria-label="Classement probabiliste Matches">
-        {rankedCandidates.map((item) => <button key={item.digit} className={`${candidate?.digit === item.digit ? "predicted" : ""} ${selectedDigit === item.digit ? "selected" : ""}`} onClick={() => onSelectDigit(item.digit)} aria-label={`Digit ${item.digit}, probabilité modélisée ${(item.probability * 100).toFixed(1)} pour cent`}>
+      <div className="match-candidate-grid" role="group" aria-label={lastDigitMode ? "Fréquences observées Matches" : "Classement probabiliste Matches"}>
+        {rankedCandidates.map((item) => <button key={item.digit} className={`${candidate?.digit === item.digit ? "predicted" : ""} ${selectedDigit === item.digit ? "selected" : ""}`} onClick={() => onSelectDigit(item.digit)} aria-label={`Digit ${item.digit}, ${lastDigitMode ? "fréquence observée" : "probabilité modélisée"} ${(item.probability * 100).toFixed(1)} pour cent`}>
           <b>{item.digit}</b><span>{(item.probability * 100).toFixed(1)}%</span><i style={{ height: `${Math.max(4, (item.probability / maximumProbability) * 100)}%` }}/>
         </button>)}
       </div>
 
-      <p className="digit-balloon-note">Estimation recalculée à chaque nouveau tick. Le flux Deriv utilise un RNG sécurisé: ce résultat ne garantit pas le prochain digit.</p>
+      <p className="digit-balloon-note">{lastDigitMode ? "Classement recalculé à chaque tick. Les fréquences décrivent les ticks passés ; elles ne garantissent pas le prochain digit." : "Estimation recalculée à chaque nouveau tick. Le flux Deriv utilise un RNG sécurisé: ce résultat ne garantit pas le prochain digit."}</p>
     </div>}
   </aside>;
 }
