@@ -1,0 +1,126 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import ts from "typescript";
+
+const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const page = read("../app/page.tsx");
+const config = read("../lib/dbx-matches.ts").replaceAll("export ", "");
+const prediction = read("../lib/match-prediction.ts").replaceAll("export ", "");
+const importer = page.slice(page.indexOf("const defaultImportedMatchStrategy:"), page.indexOf("const eaStrategyPresets:"));
+const runner = page.slice(page.indexOf("  function maybeRunDerivAuto("), page.indexOf("  function requestDerivOverUnderQuoteScan("));
+const selection = page.slice(page.indexOf("  function selectMatchStrategy("), page.indexOf("  async function importMatchStrategyFile("));
+const helpers = vm.createContext({});
+vm.runInContext(ts.transpileModule(config + prediction + importer + "\nglobalThis.api = { DBX_MATCH_CONFIG, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, helpers);
+const { DBX_MATCH_CONFIG, buildDbxMatchOrder, validDbxQuote, parseAdvancedMatchStrategyMarkdown, dbxMatchStrategy } = helpers.api;
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("importable DBX profile reflects fixed XML trade options without a statistical entry", () => {
+  const profile = parseAdvancedMatchStrategyMarkdown(read("../strategies/matches-dbx-v2-pro.md"));
+  assert.equal(profile.executionMode, "dbx_fixed");
+  assert.equal(profile.fixedDigit, 1); assert.equal(profile.barrierMode, "fixed");
+  assert.equal(profile.stake, 5); assert.equal(profile.contractsPerSignal, 1);
+  assert.equal(profile.bypassPayoutFilter, true);
+  assert.equal(profile.maxRecoverySteps, 0);
+  assert.equal(profile.takeProfit, null); assert.equal(profile.stopLoss, null);
+  assert.deepEqual(plain(buildDbxMatchOrder(5)), { contractType: "DIGITMATCH", symbol: "1HZ50V", barrier: 1, duration: 1, stake: 5, batchIndex: 1, batchTotal: 1, dbx: true });
+});
+
+test("fixed stake remains configurable; invalid stakes and quotes cannot buy", () => {
+  assert.equal(buildDbxMatchOrder(7.5).stake, 7.5);
+  for (const stake of [NaN, Infinity, 0, -1, 0.34]) assert.equal(buildDbxMatchOrder(stake), null);
+  assert.equal(validDbxQuote(5, 48, 5, 100), true);
+  for (const values of [[6,48,5,100], [5,NaN,5,100], [0,48,5,100], [5,5,5,100], [5,48,5,4], [5,48,5,null]]) assert.equal(validDbxQuote(...values), false);
+});
+
+function harness() {
+  const refs = {
+    derivModeRef: "auto", derivAutoRunningRef: true, derivStatusRef: "demo",
+    derivOpenContractsRef: new Set(), derivAutoQuoteRef: new Map(), derivPendingBuysRef: new Map(), derivOverUnderQuoteScanRef: null,
+    derivMaxSignalsRef: 200, derivSessionSignalsRef: 0, derivContractTypeRef: "DIGITMATCH",
+    derivMatchStrategyRef: dbxMatchStrategy, derivSessionPnlRef: 0, derivMarketRef: "1HZ50V",
+    derivPortfolioReadyRef: true, derivStakeRef: 5, derivBalanceRef: 100, derivCurrencyRef: "USD",
+    derivAutoDigitBarrierModeRef: "dynamic", derivMatchPositionCountRef: 5, derivDigitBarrierRef: 7,
+    derivMartingaleEnabledRef: true, derivDoubleRiskEnabledRef: true, derivHalfBalanceRiskEnabledRef: true,
+  };
+  const state = Object.fromEntries(Object.entries(refs).map(([key, current]) => [key, { current }]));
+  const orders = [], statuses = [], selected = [];
+  const context = vm.createContext({ ...state, DBX_MATCH_CONFIG, dbxMatchStrategy, defaultImportedMatchStrategy: {}, importedMatchProfile: null, buildDbxMatchOrder,
+    isDerivTradingStatus: (status) => status === "demo", pairBalanceAllows: (cost, balance) => balance >= cost,
+    setDerivAutoStatus: (text) => statuses.push(text),
+    stopDerivAutoOnSignalLimit: () => { state.derivAutoRunningRef.current = false; },
+    stopDerivAutoOnPnlLimit: () => { state.derivAutoRunningRef.current = false; },
+    registerDerivSessionSignal: () => state.derivSessionSignalsRef.current++,
+    requestDerivAutoPosition: (_, order) => { orders.push(plain(order)); state.derivAutoQuoteRef.current.set(1, order); },
+    stopDerivAuto: () => { state.derivAutoRunningRef.current = false; },
+    changeDerivMarket: (market) => { state.derivMarketRef.current = market; },
+    ...Object.fromEntries(["setMatchStrategy", "setMatchStrategySelection", "setDerivMode", "setDerivContractCategory", "setDerivContractType", "setDerivAutoDigitBarrierMode", "setDerivMatchPositionCount", "setDerivDigitBarrier", "setDerivStake", "setDerivMartingaleEnabled", "setDerivDoubleRiskEnabled", "setDerivHalfBalanceRiskEnabled", "setMatchPredictionOpen", "setMatchStrategyImportStatus"].map((name) => [name, (value) => selected.push([name, value])])),
+  });
+  vm.runInContext(ts.transpileModule(runner + selection + "\nglobalThis.run = maybeRunDerivAuto; globalThis.select = selectMatchStrategy;", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  return { state, orders, statuses, selected, run: (ticks = [100.007]) => context.run(ticks, {}), select: () => context.select("dbx") };
+}
+
+test("DBX execution skips statistical filters and ignores risk multipliers after losses", () => {
+  const h = harness();
+  h.run([100.007]); // Digit 1 has not appeared: still a fixed prediction.
+  assert.equal(h.orders.length, 1);
+  assert.equal(h.orders[0].barrier, 1); assert.equal(h.orders[0].stake, 5);
+  h.run(); assert.equal(h.orders.length, 1, "pending quote blocks another order");
+  h.state.derivAutoQuoteRef.current.clear();
+  h.state.derivPendingBuysRef.current.set(1, h.orders[0]);
+  h.run(); assert.equal(h.orders.length, 1, "pending buy blocks another order");
+  h.state.derivPendingBuysRef.current.clear(); h.state.derivOpenContractsRef.current.add(123);
+  h.run(); assert.equal(h.orders.length, 1, "open contract blocks another order");
+  h.state.derivOpenContractsRef.current.clear(); h.state.derivSessionPnlRef.current = -5;
+  h.run([100.009]);
+  assert.equal(h.orders.length, 2);
+  assert.deepEqual(h.orders[1], h.orders[0], "a loss changes neither digit, duration, market nor stake");
+});
+
+test("DBX honours Stop, session limit, account readiness, market and available funds", () => {
+  for (const [key, value] of [["derivAutoRunningRef", false], ["derivPortfolioReadyRef", false], ["derivSessionSignalsRef", 200], ["derivMarketRef", "R_25"], ["derivBalanceRef", 4]]) {
+    const h = harness(); h.state[key].current = value; h.run(); assert.equal(h.orders.length, 0, key);
+  }
+  const h = harness(); h.run([]); h.run([NaN]); assert.equal(h.orders.length, 0);
+});
+
+test("selecting the preset configures DBX but never starts trading", () => {
+  const h = harness(); h.state.derivAutoRunningRef.current = false; h.state.derivMarketRef.current = "R_25";
+  h.select();
+  assert.equal(h.state.derivMarketRef.current, "1HZ50V");
+  assert.equal(h.state.derivDigitBarrierRef.current, 1);
+  assert.equal(h.state.derivStakeRef.current, 5);
+  assert.equal(h.state.derivMatchPositionCountRef.current, 1);
+  assert.equal(h.state.derivMartingaleEnabledRef.current, false);
+  assert.equal(h.state.derivAutoRunningRef.current, false);
+  assert.equal(h.orders.length, 0);
+  assert.ok(h.selected.some(([name, value]) => name === "setMatchStrategySelection" && value === "dbx"));
+});
+
+test("strategy selector exposes DBX and its fixed stake can be edited before Play", async () => {
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const ast = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const nodes = [];
+  function visit(node) {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) nodes.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  const selector = nodes.find((node) => ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "select" && node.openingElement.getText(ast).includes('aria-label="Stratégie Matches"'));
+  const stake = nodes.find((node) => ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === "input" && node.getText(ast).includes("value={derivStake}") && node.getText(ast).includes("derivDoubleRiskSeriesIndexRef"));
+  assert.ok(selector); assert.ok(stake);
+  const selected = [];
+  const context = vm.createContext({ React, DBX_MATCH_CONFIG, matchStrategySelection: "dbx", derivAutoRunning: false,
+    importedMatchProfile: null, selectMatchStrategy: (value) => selected.push(value),
+    isDbxMatch: true, derivHalfBalanceRiskEnabled: false, derivStake: 5 });
+  vm.runInContext(ts.transpileModule(`globalThis.selector = (${selector.getText(ast)}); globalThis.stake = (${stake.getText(ast)});`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText, context);
+  assert.match(renderToStaticMarkup(context.selector), /DBX \(V2\) Pro/);
+  context.selector.props.onChange({ target: { value: "dbx" } });
+  assert.deepEqual(selected, ["dbx"]);
+  assert.equal(context.stake.props.disabled, false);
+  assert.equal(context.stake.props.value, 5);
+});

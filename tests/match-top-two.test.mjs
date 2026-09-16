@@ -8,7 +8,8 @@ const predictionSource = readFileSync(new URL("../lib/match-prediction.ts", impo
 const pageSource = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
 const importerSource = pageSource.slice(pageSource.indexOf("const defaultImportedMatchStrategy:"), pageSource.indexOf("const eaStrategyPresets:"));
 const context = vm.createContext({});
-const source = predictionSource.replaceAll("export ", "") + "\n" + importerSource + `
+const dbxSource = readFileSync(new URL("../lib/dbx-matches.ts", import.meta.url), "utf8").replaceAll("export ", "");
+const source = dbxSource + "\n" + predictionSource.replaceAll("export ", "") + "\n" + importerSource + `
 globalThis.api = { buildMatchPrediction, parseAdvancedMatchStrategyMarkdown };
 `;
 vm.runInContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText, context);
