@@ -9,10 +9,19 @@ export const DBX_MATCH_CONFIG = {
   stake: 5,
 } as const;
 
-export function buildDbxMatchOrder(stake: number) {
-  if (!Number.isFinite(stake) || stake < 0.35) return null;
+export const DBX_DYNAMIC_MATCH_CONFIG = {
+  name: "DBX (V3) Adaptatif · Matches dynamique",
+  windowSize: 50,
+} as const;
+
+export function isDbxMode(mode: string) {
+  return mode === "dbx_fixed" || mode === "dbx_dynamic";
+}
+
+export function buildDbxMatchOrder(stake: number, digit: number = DBX_MATCH_CONFIG.barrier) {
+  if (!Number.isFinite(stake) || stake < 0.35 || !Number.isInteger(digit) || digit < 0 || digit > 9) return null;
   return { contractType: DBX_MATCH_CONFIG.contractType, symbol: DBX_MATCH_CONFIG.symbol,
-    barrier: DBX_MATCH_CONFIG.barrier, duration: DBX_MATCH_CONFIG.duration,
+    barrier: digit, duration: DBX_MATCH_CONFIG.duration,
     stake, batchIndex: 1, batchTotal: 1, dbx: true as const };
 }
 
