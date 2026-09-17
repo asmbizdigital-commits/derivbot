@@ -13,7 +13,7 @@ Ce fichier active explicitement le mode manuel. Dans la version corrigée de l�
 ## Réglages et exécution
 
 - `DIGITMATCH`, Volatility 50 (1s), `1HZ50V`, un contrat à la fois.
-- Digit choisi parmi le Top 2 adaptatif sur 50 ticks ; 200 ticks valides requis avant cotation.
+- Digit manuel de 0 à 9 ou choisi parmi le Top 2 adaptatif sur 50 ticks ; 200 ticks valides requis avant cotation.
 - Seuil manuel modifiable de 0 à 100 % avant Play. Dans le JSON, `0.10` signifie 10 % ; `null` rétablit le filtre automatique prudent avec marge de 2 % de la mise.
 - **Durée manuelle en ticks** : sélecteur de 1 à 10 disponible en mode manuel et Full automatique pour tous les profils Matches, réglable avant Play ; estimation non calibrée pour une échéance de plusieurs ticks.
 - Mise fixe de 5 par défaut ; budget de perte de 4 mises par session, réglable avant Play. Le budget repart au prochain Play.
@@ -46,3 +46,12 @@ Ce fichier active explicitement le mode manuel. Dans la version corrigée de l�
 ```
 
 La correction nécessite le code de l’application mis à jour : réimporter ce MD dans une ancienne version ne suffit pas à changer la formule du filtre. Les anciens profils automatiques restent prudents ; seul ce fichier est préconfiguré en manuel.
+
+## Choix du digit : adaptatif ou manuel
+
+Avant Play, utiliser **Mode du digit** :
+
+- **Adaptatif** (par défaut) : le système choisit dans le Top 2 sur 50 ticks. Le JSON utilise `"barrierMode": "dynamic"` et `"fixedDigit": null`.
+- **Manuel** : sélectionner un entier de **0 à 9**, conservé pour chaque contrat jusqu’à modification. Exemple d’import : remplacer ces deux propriétés par `"barrierMode": "fixed"` et `"fixedDigit": 0` pour trader le digit zéro. Le digit n’a pas besoin d’être dans le Top 2.
+
+Le popup affiche le digit manuel et **son** estimation. Le seuil, le contrôle des cotations et le budget de perte restent appliqués. Choisir un digit manuellement ne force donc pas l’achat. Les changements sont bloqués pendant le trading ou tant qu’une cotation, un achat ou un contrat est en cours.

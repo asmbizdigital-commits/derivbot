@@ -71,3 +71,15 @@ test("V3.1 popup identifies manual threshold and contract duration", () => {
   assert.match(html, /Seuil : 9\.00% \(manuel\) · Durée : 6 tick/);
   assert.match(html, /Estimation du prochain tick, non calibrée pour cette durée/);
 });
+
+test("V3 manual popup shows the chosen zero and its estimate instead of the adaptive winner", () => {
+  const html = render([...Array(30).fill(7), ...Array(20).fill(3)], {
+    strategyRules: { ...context.rules, selectionMode: "top_two_adaptive" }, manualDigit: 0, selectedDigit: 0,
+  });
+  assert.match(html, /DIGIT MANUEL<\/small><strong>0<\/strong>/);
+  assert.match(html, /Digit 0 choisi manuellement/);
+  assert.doesNotMatch(html, /Choix top 2/);
+  assert.match(html, /Dernier digit reçu : 3/);
+  const locked = render(Array(50).fill(7), { selectionDisabled: true });
+  assert.equal((locked.match(/disabled=""/g) ?? []).length, 10);
+});

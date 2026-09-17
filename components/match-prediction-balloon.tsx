@@ -12,6 +12,8 @@ type MatchPredictionBalloonProps = {
   ticks: number[];
   selectedDigit: number;
   strategyRules?: MatchStrategyRules;
+  manualDigit?: number | null;
+  selectionDisabled?: boolean;
   fixedContract?: { digit: number; duration: number };
   quoteGuard?: { minimumTicks: number; status: string; duration?: number; minimumProbability?: number | null };
   onClose: () => void;
@@ -21,7 +23,7 @@ type MatchPredictionBalloonProps = {
 
 type BalloonPosition = { x: number; y: number } | null;
 
-export function MatchPredictionBalloon({ open, connected, marketName, pipSize, ticks, selectedDigit, strategyRules = DEFAULT_MATCH_STRATEGY_RULES, fixedContract, quoteGuard, onClose, onOpen, onSelectDigit }: MatchPredictionBalloonProps) {
+export function MatchPredictionBalloon({ open, connected, marketName, pipSize, ticks, selectedDigit, strategyRules = DEFAULT_MATCH_STRATEGY_RULES, fixedContract, manualDigit = null, selectionDisabled = false, quoteGuard, onClose, onOpen, onSelectDigit }: MatchPredictionBalloonProps) {
   const [minimized, setMinimized] = useState(false);
   const [position, setPosition] = useState<BalloonPosition>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; left: number; top: number } | null>(null);
@@ -30,13 +32,15 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
   const lastQuote = lastPrice !== undefined && Number.isFinite(lastPrice) && Math.abs(lastPrice) < 1e21
     && Number.isInteger(pipSize) && pipSize >= 0 && pipSize <= 20 ? lastPrice.toFixed(pipSize) : null;
   const lastDigit = lastQuote?.at(-1) ?? null;
-  const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, null, strategyRules), [pipSize, liveTicks, strategyRules]);
+  const prediction = useMemo(() => buildMatchPrediction(liveTicks, pipSize, manualDigit, strategyRules), [pipSize, liveTicks, strategyRules, manualDigit]);
   const rankedCandidates = useMemo(() => [...prediction.candidates].sort((left, right) => right.probability - left.probability || left.digit - right.digit), [prediction.candidates]);
   const lastDigitMode = strategyRules.selectionMode === "last_digit_top_two";
-  const candidate = prediction.bestCandidate ?? (lastDigitMode ? null : rankedCandidates[0] ?? null);
+  const candidate = prediction.bestCandidate ?? (manualDigit !== null ? prediction.candidates.find((item) => item.digit === manualDigit) ?? null : lastDigitMode ? null : rankedCandidates[0] ?? null);
   const topTwo = rankedCandidates.slice(0, 2);
   const adaptive = strategyRules.selectionMode === "top_two_adaptive";
-  const predictionStatus = lastDigitMode
+  const predictionStatus = manualDigit !== null
+    ? prediction.ready ? `Digit ${manualDigit} choisi manuellement · seuil vérifié avant achat` : `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés · digit ${manualDigit} manuel`
+    : lastDigitMode
     ? !prediction.ready ? `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés` : candidate ? `Dernier digit ${lastDigit} confirmé dans le Top 2` : `Attente : dernier digit ${lastDigit ?? "—"} hors Top 2`
     : adaptive
     ? prediction.ready ? `Choix top 2 · ${prediction.validationSamples ?? 0} prévisions passées comparées` : `${prediction.sampleSize}/${strategyRules.minimumTicks} ticks collectés`
@@ -92,7 +96,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
       {fixedContract && <p className="digit-balloon-note"><b>DBX V2 · digit fixe {fixedContract.digit} · {fixedContract.duration} tick{fixedContract.duration > 1 ? "s" : ""}</b><br/>Prédiction informative : elle ne modifie pas le digit acheté. Les estimations ci-dessous concernent le prochain tick, pas une échéance de plusieurs ticks.</p>}
 
       <div className="match-prediction-hero" aria-live="polite">
-        <span><small>{lastDigitMode ? "DIGIT À MATCHER" : "DIGIT ESTIMÉ"}</small><strong>{candidate?.digit ?? "-"}</strong></span>
+        <span><small>{manualDigit !== null ? "DIGIT MANUEL" : lastDigitMode ? "DIGIT À MATCHER" : "DIGIT ESTIMÉ"}</small><strong>{candidate?.digit ?? "-"}</strong></span>
         <div><small>{lastDigitMode ? "FRÉQUENCE OBSERVÉE" : adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
 
@@ -111,7 +115,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
       </div>}
 
       <div className="match-candidate-grid" role="group" aria-label={lastDigitMode ? "Fréquences observées Matches" : "Classement probabiliste Matches"}>
-        {rankedCandidates.map((item) => <button key={item.digit} disabled={!!fixedContract} className={`${candidate?.digit === item.digit ? "predicted" : ""} ${selectedDigit === item.digit ? "selected" : ""}`} onClick={() => { if (!fixedContract) onSelectDigit(item.digit); }} aria-label={`Digit ${item.digit}, ${lastDigitMode ? "fréquence observée" : "probabilité modélisée"} ${(item.probability * 100).toFixed(1)} pour cent`}>
+        {rankedCandidates.map((item) => <button key={item.digit} disabled={!!fixedContract || selectionDisabled} className={`${candidate?.digit === item.digit ? "predicted" : ""} ${selectedDigit === item.digit ? "selected" : ""}`} onClick={() => { if (!fixedContract && !selectionDisabled) onSelectDigit(item.digit); }} aria-label={`Digit ${item.digit}, ${lastDigitMode ? "fréquence observée" : "probabilité modélisée"} ${(item.probability * 100).toFixed(1)} pour cent`}>
           <b>{item.digit}</b><span>{(item.probability * 100).toFixed(1)}%</span><i style={{ height: `${Math.max(4, (item.probability / maximumProbability) * 100)}%` }}/>
         </button>)}
       </div>

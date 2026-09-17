@@ -10,7 +10,7 @@ L’ancienne V3 choisissait un digit adaptatif puis achetait sans vérifier l’
 
 ## Contrôles avant chaque achat
 
-1. **Choix inchangé** : Top 2 adaptatif sur les 50 derniers ticks, combinant fréquence, récence et transitions. Aucun changement forcé du digit après une perte.
+1. **Choix du digit** : digit manuel de 0 à 9 ou, par défaut, Top 2 adaptatif sur les 50 derniers ticks, combinant fréquence, récence et transitions. Aucun changement forcé du digit après une perte.
 2. **Données supplémentaires** : au moins **200 ticks valides disponibles**. L’historique chargé compte ; il ne faut pas attendre 200 nouveaux ticks si ces données sont déjà disponibles.
 3. **Fréquence prudente** : compter les occurrences du digit choisi sur les 200 derniers ticks et calculer la borne basse de Wilson avec `z = 2,576`. Ce réglage correspond approximativement à une queue unilatérale de 0,5 % par digit ; il ne garantit pas une couverture sur des sélections répétées ou des données dépendantes.
 4. **Score retenu en automatique** : minimum de l’estimation du modèle et de cette borne historique. En manuel, seule l’estimation du modèle est comparée au seuil. Pendant la cotation, retenir aussi le minimum entre l’estimation demandée et celle recalculée.
@@ -61,3 +61,12 @@ Ces réglages se changent avant Play, sans cotation, achat ou contrat en cours. 
 ## Limites de validation
 
 Les tests logiciels couvrent le calcul du payout, le refus de données insuffisantes, les cotations périmées, les changements de digit, les achats simultanés et le budget. Les séquences synthétiques vérifient les branches du code ; elles ne prouvent aucune rentabilité sur Deriv. Aucun trade réel n’est lancé par cette mise à jour. Il faudrait un historique détaillé et une validation prospective séparée pour évaluer les performances.
+
+## Choix du digit : adaptatif ou manuel
+
+Avant Play, utiliser **Mode du digit** :
+
+- **Adaptatif** (par défaut) : le système choisit dans le Top 2 sur 50 ticks. Le JSON utilise `"barrierMode": "dynamic"` et `"fixedDigit": null`.
+- **Manuel** : sélectionner un entier de **0 à 9**, conservé pour chaque contrat jusqu’à modification. Exemple d’import : remplacer ces deux propriétés par `"barrierMode": "fixed"` et `"fixedDigit": 0` pour trader le digit zéro. Le digit n’a pas besoin d’être dans le Top 2.
+
+Le popup affiche le digit manuel et **son** estimation. Le seuil, le contrôle des cotations et le budget de perte restent appliqués. Choisir un digit manuellement ne force donc pas l’achat. Les changements sont bloqués pendant le trading ou tant qu’une cotation, un achat ou un contrat est en cours.

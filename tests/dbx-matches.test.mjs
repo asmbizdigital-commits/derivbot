@@ -521,3 +521,78 @@ test("manual ticket derives Matches duration from the chosen value instead of th
     assert.equal(context.actual, expected);
   }
 });
+
+test("V3 imports and orders every manual digit including zero outside the adaptive Top 2", () => {
+  const doc = read("../strategies/matches-dbx-v3-1-seuil-personnalisable.md");
+  for (let digit = 0; digit <= 9; digit++) {
+    const profile = parseAdvancedMatchStrategyMarkdown(doc.replace('"barrierMode": "dynamic"', '"barrierMode": "fixed"').replace('"fixedDigit": null', `"fixedDigit": ${digit}`));
+    assert.equal(profile.barrierMode, "fixed"); assert.equal(profile.fixedDigit, digit);
+    const h = harness(true); h.state.derivMatchStrategyRef.current = profile; h.run(mostly(7));
+    assert.equal(h.orders[0].barrier, digit); assert.equal(h.orders[0].matchCandidate.digit, digit);
+    h.state.derivAutoQuoteRef.current.clear(); h.run(mostly(3));
+    assert.equal(h.orders[1].barrier, digit, "ranking changes cannot override the manual choice");
+  }
+  for (const invalid of ['null', '-1', '10', '1.5', '"0"']) {
+    assert.throws(() => parseAdvancedMatchStrategyMarkdown(doc.replace('"barrierMode": "dynamic"', '"barrierMode": "fixed"').replace('"fixedDigit": null', `"fixedDigit": ${invalid}`)), /digit manuel/);
+  }
+});
+
+test("V3 digit controls synchronize strategy and barrier state and refuse in-flight changes", () => {
+  const code = page.slice(page.indexOf("  function changeDbxDigit("), page.indexOf("  function changeDbxThreshold("));
+  for (const blocked of ["none", "running", "quote", "buy", "open", "other", "invalid"]) {
+    const state = { current: blocked === "other" ? dbxMatchStrategy : dbxDynamicMatchStrategy }; const updates = [];
+    const context = vm.createContext({ derivAutoRunningRef: { current: blocked === "running" },
+      derivOpenContractsRef: { current: new Set(blocked === "open" ? [1] : []) },
+      derivPendingBuysRef: { current: new Map(blocked === "buy" ? [[1, {}]] : []) },
+      derivAutoQuoteRef: { current: new Map(blocked === "quote" ? [[1, {}]] : []) },
+      derivMatchStrategyRef: state, derivAutoDigitBarrierModeRef: { current: "dynamic" }, derivDigitBarrierRef: { current: 7 },
+      setMatchStrategy: (value) => updates.push(value), setDerivAutoDigitBarrierMode() {}, setDerivDigitBarrier() {}, setDerivProposal() {},
+    });
+    vm.runInContext(ts.transpileModule(code + `\nchangeDbxDigit(${blocked === "invalid" ? 10 : 0});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    assert.equal(updates.length, blocked === "none" ? 1 : 0);
+    if (blocked === "none") {
+      assert.equal(state.current.fixedDigit, 0); assert.equal(context.derivDigitBarrierRef.current, 0);
+      assert.equal(context.derivAutoDigitBarrierModeRef.current, "fixed");
+      vm.runInContext("changeDbxDigit(null);", context);
+      assert.equal(state.current.fixedDigit, null); assert.equal(state.current.barrierMode, "dynamic");
+      assert.equal(context.derivAutoDigitBarrierModeRef.current, "dynamic");
+    }
+  }
+});
+
+test("V3 purchase gate evaluates the manual digit even when the adaptive winner differs", () => {
+  const begin = page.indexOf("            if (autoQuote.dbxGuardRequestedAt !== undefined)");
+  const end = page.indexOf("            if (autoQuote.dbxLastDigit)", begin);
+  const ticks = mostly(7);
+  assert.equal(buildMatchPrediction(ticks, 3, null, dbxDynamicMatchStrategy.rules).bestCandidate.digit, 7);
+  const manualCandidate = buildMatchPrediction(ticks, 3, 0, dbxDynamicMatchStrategy.rules).bestCandidate;
+  for (const mode of ["accept", "threshold", "digit_changed", "budget"]) {
+    const context = vm.createContext({ Date: { now: () => 1000 },
+      autoQuote: { dbxGuardRequestedAt: 900, symbol: "1HZ50V", barrier: 0, matchCandidate: manualCandidate },
+      proposal: { ask_price: 5, payout: 44.64 },
+      derivMatchStrategyRef: { current: { ...dbxDynamicMatchStrategy, barrierMode: "fixed", fixedDigit: mode === "digit_changed" ? 1 : 0, dbxMinimumProbability: mode === "threshold" ? 1 : 0 } },
+      derivTicksRef: { current: ticks }, derivPipSizeRef: { current: 3 }, derivMarketRef: { current: "1HZ50V" },
+      derivSessionPnlRef: { current: mode === "budget" ? -20 : 0 }, derivStakeRef: { current: 5 },
+      buildMatchPrediction, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, setDerivAutoStatus() {}, stopDerivAutoOnPnlLimit() {} });
+    vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.accepted = check() === true;`, context);
+    assert.equal(context.accepted, mode === "accept", mode);
+  }
+});
+
+test("V3 digit UI offers adaptive/manual mode and all ten digits", async () => {
+  const React = await import("react"); const { renderToStaticMarkup } = await import("react-dom/server");
+  const ast = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX); const nodes = [];
+  function visit(node) { if (ts.isJsxElement(node)) nodes.push(node); ts.forEachChild(node, visit); } visit(ast);
+  const selector = (label) => nodes.find((node) => node.openingElement.getText(ast).includes(`aria-label="${label}"`));
+  const changes = [];
+  const context = vm.createContext({ React, derivAutoRunning: false, derivDigitBarrier: 0, matchStrategy: { barrierMode: "fixed", fixedDigit: 0 }, changeDbxDigit: (digit) => changes.push(digit) });
+  const code = ts.transpileModule(`globalThis.mode = (${selector('Mode du digit DBX V3.1').getText(ast)}); globalThis.digit = (${selector('Digit manuel DBX V3.1').getText(ast)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
+  vm.runInContext(code, context);
+  assert.equal((renderToStaticMarkup(context.digit).match(/<option /g) ?? []).length, 10);
+  assert.match(renderToStaticMarkup(context.digit), /value="0" selected=""/);
+  context.mode.props.onChange({ target: { value: "fixed" } }); assert.equal(changes.at(-1), 0);
+  context.digit.props.onChange({ target: { value: "9" } }); assert.equal(changes.at(-1), 9);
+  context.mode.props.onChange({ target: { value: "dynamic" } }); assert.equal(changes.at(-1), null);
+  context.derivAutoRunning = true; vm.runInContext(code, context);
+  assert.equal(context.mode.props.disabled, true); assert.equal(context.digit.props.disabled, true);
+});
