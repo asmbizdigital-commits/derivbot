@@ -17,7 +17,7 @@ Le chiffre observé avant l’achat n’est pas le résultat du prochain contrat
 ## Paramètres
 
 - Instrument : **Volatility 50 (1s)**, `1HZ50V`.
-- Contrat : **DIGITMATCH**, durée **1 tick**, **un contrat à la fois**.
+- Contrat : **DIGITMATCH**, durée manuelle de **1 à 10 ticks** (1 par défaut), **un contrat à la fois**.
 - Mise : **5 dans la devise du compte par défaut**, modifiable avant Play, puis constante après gains et pertes.
 - Démarrage après **50 ticks valides disponibles**, y compris l’historique chargé.
 - Aucun seuil additionnel de fréquence ou d’Edge. Les vérifications de cotation, de solde, de portefeuille, les contrats déjà engagés, Stop et la limite de signaux restent applicables.
@@ -39,6 +39,7 @@ Sélectionner ou importer le profil prépare les paramètres sans lancer les ach
   "barrierMode": "dynamic",
   "fixedDigit": null,
   "stake": 5,
+  "durationTicks": 1,
   "contractsPerSignal": 1,
   "bypassPayoutFilter": true,
   "rules": {
@@ -50,4 +51,4 @@ Sélectionner ou importer le profil prépare les paramètres sans lancer les ach
 }
 ```
 
-Ce Markdown est destiné à l’importeur de cette application. Le mode `dbx_last_digit` impose les règles V4 décrites ; seule la mise est personnalisable à l’import. Il ne s’agit pas d’un XML pour Deriv DBot officiel.
+Ce Markdown est destiné à l’importeur de cette application. Le mode `dbx_last_digit` impose les règles V4 décrites ; la mise et `durationTicks` sont personnalisables à l’import. Il ne s’agit pas d’un XML pour Deriv DBot officiel.

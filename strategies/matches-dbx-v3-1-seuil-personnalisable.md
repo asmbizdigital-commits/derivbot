@@ -15,7 +15,7 @@ Ce fichier active explicitement le mode manuel. Dans la version corrigée de l�
 - `DIGITMATCH`, Volatility 50 (1s), `1HZ50V`, un contrat à la fois.
 - Digit choisi parmi le Top 2 adaptatif sur 50 ticks ; 200 ticks valides requis avant cotation.
 - Seuil manuel modifiable de 0 à 100 % avant Play. Dans le JSON, `0.10` signifie 10 % ; `null` rétablit le filtre automatique prudent avec marge de 2 % de la mise.
-- Durée de 1 à 10 ticks, réglable avant Play ; estimation non calibrée pour une échéance de plusieurs ticks.
+- **Durée manuelle en ticks** : sélecteur de 1 à 10 disponible en mode manuel et Full automatique pour tous les profils Matches, réglable avant Play ; estimation non calibrée pour une échéance de plusieurs ticks.
 - Mise fixe de 5 par défaut ; budget de perte de 4 mises par session, réglable avant Play. Le budget repart au prochain Play.
 - Cotations valides et récentes (3 secondes maximum), solde suffisant et absence de contrat/achat en cours requis. Aucune martingale.
 - Les refus de cotation ne consomment pas la limite de signaux. Stop interrompt les prochaines entrées.

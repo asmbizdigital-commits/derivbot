@@ -321,14 +321,14 @@ test("V2 duration is imported, validated and used in automatic orders without ch
   for (const duration of [0, -1, 11, 1.5, NaN, Infinity]) assert.equal(buildDbxMatchOrder(5, 1, duration), null);
   for (const mode of [true, "last"]) {
     const h = harness(mode); h.state.derivMatchStrategyRef.current = { ...h.state.derivMatchStrategyRef.current, durationTicks: 7 };
-    h.run(mostly(7)); assert.equal(h.orders[0].duration, mode === "last" ? 1 : 7, "V4 retains one tick; V3 uses configured duration");
+    h.run(mostly(7)); assert.equal(h.orders[0].duration, 7, "all DBX versions use configured duration");
   }
   const h = harness(); h.state.derivAutoRunningRef.current = false; h.select();
   assert.ok(h.selected.some(([name, value]) => name === "setMatchPredictionOpen" && value === true));
 });
 
 test("V2 duration changes update the live strategy and cannot change a running or pending contract", () => {
-  const code = page.slice(page.indexOf("  function changeDbxDuration("), page.indexOf("  function changeDbxThreshold("));
+  const code = page.slice(page.indexOf("  function changeMatchDuration("), page.indexOf("  function changeDbxThreshold("));
   for (const blocked of ["none", "running", "open", "buy", "quote", "other", "invalid"]) {
     const updated = [];
     const context = vm.createContext({
@@ -336,10 +336,11 @@ test("V2 duration changes update the live strategy and cannot change a running o
       derivOpenContractsRef: { current: new Set(blocked === "open" ? [1] : []) },
       derivPendingBuysRef: { current: new Map(blocked === "buy" ? [[1, {}]] : []) },
       derivAutoQuoteRef: { current: new Map(blocked === "quote" ? [[1, {}]] : []) },
-      derivMatchStrategyRef: { current: blocked === "other" ? dbxLastDigitStrategy : dbxMatchStrategy },
+      derivMatchStrategyRef: { current: dbxMatchStrategy },
+      derivContractTypeRef: { current: blocked === "other" ? "DIGITDIFF" : "DIGITMATCH" },
       setMatchStrategy: (value) => updated.push(value), setDerivProposal() {},
     });
-    vm.runInContext(ts.transpileModule(code + `\nchangeDbxDuration(${blocked === "invalid" ? 11 : 7});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    vm.runInContext(ts.transpileModule(code + `\nchangeMatchDuration(${blocked === "invalid" ? 11 : 7});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
     assert.equal(updated.length, blocked === "none" ? 1 : 0, blocked);
     if (updated.length) assert.equal(context.derivMatchStrategyRef.current.durationTicks, 7);
   }
@@ -366,13 +367,13 @@ test("V2 tick selector exposes ten choices and forwards the selection before Pla
   const ast = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let selector;
   function visit(node) {
-    if (ts.isJsxElement(node) && node.openingElement.getText(ast).includes('aria-label="Durée DBX V2 en ticks"')) selector = node;
+    if (ts.isJsxElement(node) && node.openingElement.getText(ast).includes('aria-label="Durée Matches en ticks"')) selector = node;
     ts.forEachChild(node, visit);
   }
   visit(ast); assert.ok(selector);
   const changed = [];
   const context = vm.createContext({ React, DBX_MATCH_CONFIG, matchStrategy: { ...dbxMatchStrategy, durationTicks: 7 }, derivAutoRunning: false,
-    changeDbxDuration: (value) => changed.push(value) });
+    changeMatchDuration: (value) => changed.push(value) });
   const code = ts.transpileModule(`globalThis.selector = (${selector.getText(ast)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
   vm.runInContext(code, context);
   const html = renderToStaticMarkup(context.selector);
@@ -440,8 +441,8 @@ test("V3 UI passes percent as a fraction and offers all ten contract durations",
   const field = (label) => nodes.find((node) => (ts.isJsxElement(node) ? node.openingElement : node).getText(ast).includes(`aria-label="${label}"`));
   const thresholds = [], durations = [];
   const context = vm.createContext({ React, DBX_MATCH_CONFIG, derivAutoRunning: false, matchStrategy: { dbxMinimumProbability: 0.09, durationTicks: 6 },
-    changeDbxThreshold: (value) => thresholds.push(value), changeDbxDuration: (value) => durations.push(value) });
-  const code = ['Mode du seuil DBX V3.1', 'Seuil manuel DBX V3.1 en pourcentage', 'Durée DBX V3.1 en ticks'].map((label, i) => `globalThis.field${i} = (${field(label).getText(ast)});`).join('\n');
+    changeDbxThreshold: (value) => thresholds.push(value), changeMatchDuration: (value) => durations.push(value) });
+  const code = ['Mode du seuil DBX V3.1', 'Seuil manuel DBX V3.1 en pourcentage', 'Durée Matches en ticks'].map((label, i) => `globalThis.field${i} = (${field(label).getText(ast)});`).join('\n');
   const compiled = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
   vm.runInContext(compiled, context);
   assert.equal(context.field1.props.value, 9);
@@ -488,5 +489,35 @@ test("actual quote gate applies manual model threshold and retains the weaker qu
     vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.accepted = check() === true;`, context);
     assert.equal(context.accepted, accepted);
     if (!accepted && threshold !== null) assert.match(statuses.at(-1), /estimation du modèle retenue/);
+  }
+});
+
+test("statistical Matches imports duration and sends it unchanged to the automatic quote", () => {
+  const markdown = '```json\n' + JSON.stringify({ strategy: "advanced_matches", contractType: "DIGITMATCH", durationTicks: 7, rules: { selectionMode: "top_two_frequency" } }) + '\n```';
+  const profile = parseAdvancedMatchStrategyMarkdown(markdown);
+  assert.equal(profile.executionMode, "statistical"); assert.equal(profile.durationTicks, 7);
+  const begin = page.indexOf("    const selectedContractType = digitSignal?");
+  const end = page.indexOf("\n  function requestDerivOverUnderQuoteScan(", begin);
+  const orders = [];
+  const context = vm.createContext({
+    digitSignal: { contractType: "DIGITMATCH", barrier: 7, reason: "Top 2", confidence: 10 },
+    currentContractType: "DIGITMATCH", currentMatchStrategy: profile, currentTicks: [100.007], fixedDigitBarrier: null,
+    priceSignal: null, stake: 5, socket: {}, derivMarketRef: { current: "1HZ50V" }, derivDigitBarrierRef: { current: 7 },
+    derivHalfBalanceRiskEnabledRef: { current: false }, derivMartingaleEnabledRef: { current: false },
+    isFastMatchMode: () => true, getContractCategory: () => "matches_differs", formatDerivContract: () => "Matches 7",
+    chooseDerivContractDuration: () => { throw new Error("Matches must not use adaptive duration"); },
+    requestDerivAutoPosition: (_, value) => orders.push(value),
+    setDerivContractCategory() {}, setDerivContractType() {}, setDerivDigitBarrier() {}, registerDerivSessionSignal() {}, setDerivAutoStatus() {}, setDerivMessage() {},
+  });
+  vm.runInContext(ts.transpileModule('function run() {\n' + page.slice(begin, end) + '\nrun();', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  assert.equal(orders.length, 1); assert.equal(orders[0].duration, 7);
+});
+
+test("manual ticket derives Matches duration from the chosen value instead of the adaptive decision", () => {
+  const line = page.split('\n').find((line) => line.includes('const derivDuration ='));
+  for (const [type, chosen, expected] of [["DIGITMATCH", 7, 7], ["DIGITMATCH", undefined, 1], ["CALL", 7, 3]]) {
+    const context = vm.createContext({ derivContractType: type, matchStrategy: { durationTicks: chosen }, derivDurationDecision: { duration: 3 } });
+    vm.runInContext(line + '\nglobalThis.actual = derivDuration;', context);
+    assert.equal(context.actual, expected);
   }
 });
