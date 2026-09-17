@@ -399,10 +399,10 @@ test("V3 manual threshold replaces the automatic payout gate and validates bound
 });
 
 test("V3 import supports duration and manual threshold and preserves old defaults", () => {
-  const doc = read("../strategies/matches-dbx-v3-1-payout-controle.md");
-  const custom = parseAdvancedMatchStrategyMarkdown(doc.replace('"durationTicks": 1', '"durationTicks": 6').replace('"dbxMinimumProbability": null', '"dbxMinimumProbability": 0.09'));
+  const doc = read("../strategies/matches-dbx-v3-1-seuil-personnalisable.md");
+  const custom = parseAdvancedMatchStrategyMarkdown(doc.replace('"durationTicks": 1', '"durationTicks": 6').replace('"dbxMinimumProbability": 0.10', '"dbxMinimumProbability": 0.09'));
   assert.equal(custom.durationTicks, 6); assert.equal(custom.dbxMinimumProbability, 0.09);
-  const old = parseAdvancedMatchStrategyMarkdown(doc.replace('  "durationTicks": 1,\n', '').replace('  "dbxMinimumProbability": null,\n', ''));
+  const old = parseAdvancedMatchStrategyMarkdown(doc.replace('  "durationTicks": 1,\n', '').replace('  "dbxMinimumProbability": 0.10,\n', ''));
   assert.equal(old.durationTicks, 1); assert.equal(old.dbxMinimumProbability, null);
   const h = harness(true); h.state.derivMatchStrategyRef.current = custom; h.run(mostly(7));
   assert.equal(h.orders[0].duration, 6); assert.ok(h.orders[0].dbxGuardRequestedAt);
@@ -451,4 +451,42 @@ test("V3 UI passes percent as a fraction and offers all ten contract durations",
   assert.equal((renderToStaticMarkup(context.field2).match(/<option /g) ?? []).length, 10);
   context.derivAutoRunning = true; vm.runInContext(compiled, context);
   for (const i of [0, 1, 2]) assert.equal(context[`field${i}`].props.disabled, true);
+});
+
+test("personalized MD enables manual mode on ordinary data without the hidden Wilson veto", () => {
+  const profile = parseAdvancedMatchStrategyMarkdown(read("../strategies/matches-dbx-v3-1-seuil-personnalisable.md"));
+  assert.equal(profile.dbxMinimumProbability, 0.1);
+  const uniform = prices(Array.from({ length: 200 }, (_, i) => i % 10));
+  const candidate = { digit: 1, probability: 0.101 };
+  const manual = evaluateDbxV3Quote(candidate, uniform, 3, 5, 44.64, profile.dbxMinimumProbability);
+  assert.ok(manual.conservativeProbability < 0.1);
+  assert.equal(manual.evaluatedProbability, 0.101);
+  assert.equal(manual.accepted, true);
+  assert.equal(evaluateDbxV3Quote(candidate, uniform, 3, 5, 44.64).accepted, false);
+  assert.equal(evaluateDbxV3Quote({ ...candidate, probability: 0.099 }, uniform, 3, 5, 44.64, 0.1).accepted, false);
+  for (const [ticks, ask, payout] of [[uniform.slice(1), 5, 44.64], [[NaN,...uniform.slice(1)], 5, 44.64], [uniform, 5, NaN], [uniform, 5, 5]]) {
+    assert.equal(evaluateDbxV3Quote(candidate, ticks, 3, ask, payout, 0).accepted, false);
+  }
+});
+
+test("actual quote gate applies manual model threshold and retains the weaker quote-time estimate", () => {
+  const begin = page.indexOf("            if (autoQuote.dbxGuardRequestedAt !== undefined)");
+  const end = page.indexOf("            if (autoQuote.dbxLastDigit)", begin);
+  const ticks = prices(Array.from({ length: 200 }, (_, i) => i % 10));
+  const current = buildMatchPrediction(ticks, 3, null, dbxDynamicMatchStrategy.rules).bestCandidate;
+  assert.ok(current.probability >= 0.099);
+  for (const [threshold, quotedProbability, accepted] of [[0.09, current.probability, true], [0.11, current.probability, false], [0.09, 0.08, false], [null, current.probability, false]]) {
+    const statuses = [];
+    const context = vm.createContext({ Date: { now: () => 1000 },
+      autoQuote: { dbxGuardRequestedAt: 900, symbol: "1HZ50V", barrier: current.digit, matchCandidate: { ...current, probability: quotedProbability } },
+      proposal: { ask_price: 5, payout: 44.64 },
+      derivMatchStrategyRef: { current: { ...dbxDynamicMatchStrategy, dbxMinimumProbability: threshold } },
+      derivTicksRef: { current: ticks }, derivPipSizeRef: { current: 3 }, derivMarketRef: { current: "1HZ50V" },
+      derivSessionPnlRef: { current: 0 }, derivStakeRef: { current: 5 },
+      buildMatchPrediction, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote,
+      setDerivAutoStatus: (value) => statuses.push(value), stopDerivAutoOnPnlLimit() {} });
+    vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.accepted = check() === true;`, context);
+    assert.equal(context.accepted, accepted);
+    if (!accepted && threshold !== null) assert.match(statuses.at(-1), /estimation du modèle retenue/);
+  }
 });

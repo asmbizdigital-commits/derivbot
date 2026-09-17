@@ -62,7 +62,7 @@ export function evaluateDbxV3Quote(candidate: { digit: number; probability: numb
     && Number.isInteger(pipSize) && pipSize >= 0 && pipSize <= 20
     && prices.length >= DBX_V3_GUARD.minimumTicks && prices.every((price) => Number.isFinite(price) && Math.abs(price) < 1e21)
     && Number.isFinite(ask) && ask > 0 && Number.isFinite(payout) && payout > ask;
-  if (!valid) return { accepted: false, sampleSize: prices.length, frequency: 0, lowerFrequency: 0, conservativeProbability: 0, requiredProbability: null, breakEven: null, expectedValue: null, conservativeExpectedValue: null };
+  if (!valid) return { accepted: false, sampleSize: prices.length, frequency: 0, lowerFrequency: 0, conservativeProbability: 0, evaluatedProbability: 0, requiredProbability: null, breakEven: null, expectedValue: null, conservativeExpectedValue: null };
   const count = prices.filter((price) => Number(price.toFixed(pipSize).at(-1)) === candidate!.digit).length;
   const frequency = count / prices.length;
   const z2 = 2.576 ** 2;
@@ -73,6 +73,9 @@ export function evaluateDbxV3Quote(candidate: { digit: number; probability: numb
   const expectedValue = candidate!.probability * payout - ask;
   const conservativeExpectedValue = conservativeProbability * payout - ask;
   const requiredProbability = minimumProbability ?? breakEven * (1 + DBX_V3_GUARD.minimumReturnOnStake);
-  return { accepted: conservativeProbability + 1e-12 >= requiredProbability, requiredProbability,
+  // Manual mode targets the model estimate shown in the popup.
+  // The historical lower bound remains exclusive to the automatic payout filter.
+  const evaluatedProbability = minimumProbability === null ? conservativeProbability : candidate!.probability;
+  return { accepted: evaluatedProbability + 1e-12 >= requiredProbability, evaluatedProbability, requiredProbability,
     sampleSize: prices.length, frequency, lowerFrequency, conservativeProbability, breakEven, expectedValue, conservativeExpectedValue };
 }
