@@ -280,18 +280,18 @@ test("V3.1 buy gate rejects expired quotes, changed digits and depleted budget",
   const begin = page.indexOf("            if (autoQuote.dbxGuardRequestedAt !== undefined)");
   const end = page.indexOf("            if (autoQuote.dbxLastDigit)", begin);
   assert.ok(begin > 0 && end > begin);
-  for (const reason of ["valid", "expired", "digit", "payout", "budget", "strategy", "future", "market"]) {
+  for (const reason of ["valid", "manual", "expired", "digit", "payout", "budget", "strategy", "future", "market"]) {
     const now = 1800000000000;
     const ticks = mostly(reason === "digit" ? 3 : 7);
     const context = vm.createContext({ Date: { now: () => now },
       autoQuote: { dbxGuardRequestedAt: now - (reason === "expired" ? 3001 : reason === "future" ? -1 : 100), symbol: "1HZ50V", barrier: 7, matchCandidate: { digit: 7, probability: 0.3 } },
-      proposal: { ask_price: 5, payout: reason === "payout" ? 6 : 44.64 },
-      derivMatchStrategyRef: { current: reason === "strategy" ? dbxLastDigitStrategy : dbxDynamicMatchStrategy },
+      proposal: { ask_price: 5, payout: ["payout", "manual"].includes(reason) ? 6 : 44.64 },
+      derivMatchStrategyRef: { current: reason === "strategy" ? dbxLastDigitStrategy : reason === "manual" ? { ...dbxDynamicMatchStrategy, dbxMinimumProbability: 0.09 } : dbxDynamicMatchStrategy },
       derivTicksRef: { current: ticks }, derivPipSizeRef: { current: 3 }, derivMarketRef: { current: reason === "market" ? "R_25" : "1HZ50V" },
       derivSessionPnlRef: { current: reason === "budget" ? -20 : 0 }, derivStakeRef: { current: 5 },
       buildMatchPrediction, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, setDerivAutoStatus() {}, stopDerivAutoOnPnlLimit() {} });
     vm.runInContext(`function check() { ${page.slice(begin,end)} return true; } globalThis.accepted = check() === true;`, context);
-    assert.equal(context.accepted, reason === "valid", reason);
+    assert.equal(context.accepted, ["valid", "manual"].includes(reason), reason);
   }
 });
 
@@ -321,14 +321,14 @@ test("V2 duration is imported, validated and used in automatic orders without ch
   for (const duration of [0, -1, 11, 1.5, NaN, Infinity]) assert.equal(buildDbxMatchOrder(5, 1, duration), null);
   for (const mode of [true, "last"]) {
     const h = harness(mode); h.state.derivMatchStrategyRef.current = { ...h.state.derivMatchStrategyRef.current, durationTicks: 7 };
-    h.run(mostly(7)); assert.equal(h.orders[0].duration, 1, "other versions retain one tick");
+    h.run(mostly(7)); assert.equal(h.orders[0].duration, mode === "last" ? 1 : 7, "V4 retains one tick; V3 uses configured duration");
   }
   const h = harness(); h.state.derivAutoRunningRef.current = false; h.select();
   assert.ok(h.selected.some(([name, value]) => name === "setMatchPredictionOpen" && value === true));
 });
 
 test("V2 duration changes update the live strategy and cannot change a running or pending contract", () => {
-  const code = page.slice(page.indexOf("  function changeDbxDuration("), page.indexOf("  function selectMatchStrategy("));
+  const code = page.slice(page.indexOf("  function changeDbxDuration("), page.indexOf("  function changeDbxThreshold("));
   for (const blocked of ["none", "running", "open", "buy", "quote", "other", "invalid"]) {
     const updated = [];
     const context = vm.createContext({
@@ -336,7 +336,7 @@ test("V2 duration changes update the live strategy and cannot change a running o
       derivOpenContractsRef: { current: new Set(blocked === "open" ? [1] : []) },
       derivPendingBuysRef: { current: new Map(blocked === "buy" ? [[1, {}]] : []) },
       derivAutoQuoteRef: { current: new Map(blocked === "quote" ? [[1, {}]] : []) },
-      derivMatchStrategyRef: { current: blocked === "other" ? dbxDynamicMatchStrategy : dbxMatchStrategy },
+      derivMatchStrategyRef: { current: blocked === "other" ? dbxLastDigitStrategy : dbxMatchStrategy },
       setMatchStrategy: (value) => updated.push(value), setDerivProposal() {},
     });
     vm.runInContext(ts.transpileModule(code + `\nchangeDbxDuration(${blocked === "invalid" ? 11 : 7});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
@@ -381,4 +381,74 @@ test("V2 tick selector exposes ten choices and forwards the selection before Pla
   context.selector.props.onChange({ target: { value: "10" } }); assert.deepEqual(changed, [10]);
   context.derivAutoRunning = true; vm.runInContext(code, context);
   assert.equal(context.selector.props.disabled, true);
+});
+
+test("V3 manual threshold replaces the automatic payout gate and validates bounds", () => {
+  const sample = mostly(7);
+  const candidate = { digit: 7, probability: 0.1 };
+  const auto = evaluateDbxV3Quote(candidate, sample, 3, 5, 44.64);
+  assert.equal(auto.accepted, false);
+  assert.ok(Math.abs(auto.requiredProbability - 5 / 44.64 * 1.02) < 1e-12);
+  const manual = evaluateDbxV3Quote(candidate, sample, 3, 5, 44.64, 0.09);
+  assert.equal(manual.accepted, true); assert.equal(manual.requiredProbability, 0.09);
+  assert.ok(manual.conservativeExpectedValue < 0, "manual threshold can accept below payout equilibrium");
+  assert.equal(evaluateDbxV3Quote(candidate, sample, 3, 5, 44.64, 0.1).accepted, true);
+  assert.equal(evaluateDbxV3Quote(candidate, sample, 3, 5, 44.64, 0.101).accepted, false);
+  for (const bad of [NaN, Infinity, -0.01, 1.01]) assert.equal(evaluateDbxV3Quote(candidate, sample, 3, 5, 44.64, bad).accepted, false);
+  assert.equal(evaluateDbxV3Quote(candidate, sample.slice(1), 3, 5, 44.64, 0).accepted, false);
+});
+
+test("V3 import supports duration and manual threshold and preserves old defaults", () => {
+  const doc = read("../strategies/matches-dbx-v3-1-payout-controle.md");
+  const custom = parseAdvancedMatchStrategyMarkdown(doc.replace('"durationTicks": 1', '"durationTicks": 6').replace('"dbxMinimumProbability": null', '"dbxMinimumProbability": 0.09'));
+  assert.equal(custom.durationTicks, 6); assert.equal(custom.dbxMinimumProbability, 0.09);
+  const old = parseAdvancedMatchStrategyMarkdown(doc.replace('  "durationTicks": 1,\n', '').replace('  "dbxMinimumProbability": null,\n', ''));
+  assert.equal(old.durationTicks, 1); assert.equal(old.dbxMinimumProbability, null);
+  const h = harness(true); h.state.derivMatchStrategyRef.current = custom; h.run(mostly(7));
+  assert.equal(h.orders[0].duration, 6); assert.ok(h.orders[0].dbxGuardRequestedAt);
+});
+
+test("V3 manual threshold updates state only while idle and in range", () => {
+  const code = page.slice(page.indexOf("  function changeDbxThreshold("), page.indexOf("  function selectMatchStrategy("));
+  for (const mode of ["idle", "auto", "running", "quote", "open", "buy", "other", "invalid"]) {
+    const updated = [];
+    const context = vm.createContext({
+      derivAutoRunningRef: { current: mode === "running" },
+      derivOpenContractsRef: { current: new Set(mode === "open" ? [1] : []) },
+      derivPendingBuysRef: { current: new Map(mode === "buy" ? [[1, {}]] : []) },
+      derivAutoQuoteRef: { current: new Map(mode === "quote" ? [[1, {}]] : []) },
+      derivMatchStrategyRef: { current: mode === "other" ? dbxMatchStrategy : dbxDynamicMatchStrategy },
+      setMatchStrategy: (value) => updated.push(value), setDerivProposal() {},
+    });
+    vm.runInContext(ts.transpileModule(code + `\nchangeDbxThreshold(${mode === "invalid" ? 2 : mode === "auto" ? 'null' : 0.09});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    assert.equal(updated.length, ["idle", "auto"].includes(mode) ? 1 : 0, mode);
+    if (mode === "idle") assert.equal(context.derivMatchStrategyRef.current.dbxMinimumProbability, 0.09);
+    if (mode === "auto") assert.equal(context.derivMatchStrategyRef.current.dbxMinimumProbability, null);
+  }
+});
+
+test("V3 UI passes percent as a fraction and offers all ten contract durations", async () => {
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const ast = ts.createSourceFile("page.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const nodes = [];
+  function visit(node) {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) nodes.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  const field = (label) => nodes.find((node) => (ts.isJsxElement(node) ? node.openingElement : node).getText(ast).includes(`aria-label="${label}"`));
+  const thresholds = [], durations = [];
+  const context = vm.createContext({ React, DBX_MATCH_CONFIG, derivAutoRunning: false, matchStrategy: { dbxMinimumProbability: 0.09, durationTicks: 6 },
+    changeDbxThreshold: (value) => thresholds.push(value), changeDbxDuration: (value) => durations.push(value) });
+  const code = ['Mode du seuil DBX V3.1', 'Seuil manuel DBX V3.1 en pourcentage', 'Durée DBX V3.1 en ticks'].map((label, i) => `globalThis.field${i} = (${field(label).getText(ast)});`).join('\n');
+  const compiled = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
+  vm.runInContext(compiled, context);
+  assert.equal(context.field1.props.value, 9);
+  context.field1.props.onChange({ target: { value: '8.5' } }); assert.equal(thresholds.at(-1), 0.085);
+  context.field0.props.onChange({ target: { value: 'auto' } }); assert.equal(thresholds.at(-1), null);
+  context.field2.props.onChange({ target: { value: '6' } }); assert.equal(durations.at(-1), 6);
+  assert.equal((renderToStaticMarkup(context.field2).match(/<option /g) ?? []).length, 10);
+  context.derivAutoRunning = true; vm.runInContext(compiled, context);
+  for (const i of [0, 1, 2]) assert.equal(context[`field${i}`].props.disabled, true);
 });

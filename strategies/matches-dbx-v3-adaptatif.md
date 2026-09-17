@@ -14,7 +14,7 @@ L’ancienne V3 choisissait un digit adaptatif puis achetait sans vérifier l’
 2. **Données supplémentaires** : au moins **200 ticks valides disponibles**. L’historique chargé compte ; il ne faut pas attendre 200 nouveaux ticks si ces données sont déjà disponibles.
 3. **Fréquence prudente** : compter les occurrences du digit choisi sur les 200 derniers ticks et calculer la borne basse de Wilson avec `z = 2,576`. Ce réglage correspond approximativement à une queue unilatérale de 0,5 % par digit ; il ne garantit pas une couverture sur des sélections répétées ou des données dépendantes.
 4. **Score retenu** : minimum de l’estimation du modèle et de cette borne historique. Pendant la cotation, retenir aussi le minimum entre l’estimation demandée et celle recalculée.
-5. **Payout réel** : calculer le seuil `prix / paiement brut` et l’espérance prudente `score × paiement brut − prix`. Accepter seulement si cette dernière atteint **2 % de la mise cotée**. Les fréquences seules ne déclenchent plus l’achat.
+5. **Payout réel** : calculer le seuil `prix / paiement brut` et l’espérance prudente `score × paiement brut − prix`. Par défaut, accepter seulement si cette dernière atteint **2 % de la mise cotée**. L’option **Seuil manuel (%)** remplace cette condition par `score prudent ≥ seuil choisi`. Le seuil d’équilibre réel reste affiché dans les refus ; il n’est plus un minimum imposé en mode manuel. Les fréquences seules ne déclenchent plus l’achat.
 6. **Fraîcheur** : refuser une réponse reçue plus de **3 secondes** après la demande, un changement d’instrument, ou un digit devenu différent de celui de la cotation.
 7. **Budget de perte** : réserver la prochaine mise avant de demander une cotation, puis le prix réel avant l’achat. Par défaut, perte nette maximale de session de **4 mises** (20 $ pour une mise de 5 $), réglable de 1 à 100 mises avant Play. Arrêt après clôture si une nouvelle mise peut dépasser le budget. Le budget est réinitialisé au prochain Play.
 
@@ -22,7 +22,7 @@ La borne historique n’est pas une probabilité calibrée du prochain tick. Le 
 
 ## Exécution et suivi
 
-- `DIGITMATCH` sur **Volatility 50 (1s)**, `1HZ50V`, durée **1 tick**, **un contrat à la fois**.
+- `DIGITMATCH` sur **Volatility 50 (1s)**, `1HZ50V`, durée **1 à 10 ticks** (1 par défaut), **un contrat à la fois**.
 - Mise **5 par défaut**, modifiable avant Play, sans martingale, double risque ni demi-solde.
 - La popup affiche les estimations et le **statut du contrôle payout**, notamment le motif du refus.
 - Les demandes de cotation refusées ne consomment plus la limite de signaux ; la V3.1 compte une entrée quand elle envoie l’achat, même si le serveur refuse ensuite cet achat.
@@ -40,6 +40,8 @@ La borne historique n’est pas une probabilité calibrée du prochain tick. Le 
   "barrierMode": "dynamic",
   "fixedDigit": null,
   "stake": 5,
+  "durationTicks": 1,
+  "dbxMinimumProbability": null,
   "contractsPerSignal": 1,
   "bypassPayoutFilter": false,
   "risk": { "lossBudgetStakes": 4 },
@@ -52,7 +54,9 @@ La borne historique n’est pas une probabilité calibrée du prochain tick. Le 
 }
 ```
 
-Le mode `dbx_dynamic` impose cette version intégrée ; modifier `bypassPayoutFilter` dans un ancien fichier ne désactive pas les contrôles. La mise et `risk.lossBudgetStakes` sont personnalisables à l’import.
+Le mode `dbx_dynamic` impose cette version intégrée ; modifier `bypassPayoutFilter` dans un ancien fichier ne désactive pas les contrôles. La mise, `durationTicks`, `dbxMinimumProbability` et `risk.lossBudgetStakes` sont personnalisables à l’import. `dbxMinimumProbability: null` conserve le seuil automatique ; `0.09` signifie un seuil manuel de **9 %** (le champ de l’interface affiche 9). Le seuil manuel est réglable de 0 à 100 %, et la durée de 1 à 10 ticks. Les anciens fichiers sans ces propriétés conservent 1 tick et le seuil automatique.
+
+Ces réglages se changent avant Play, sans cotation, achat ou contrat en cours. En mode manuel, un seuil inférieur à l’équilibre du payout peut autoriser une entrée dont l’espérance estimée est négative. Le budget de perte reste actif. Les 200 ticks de contrôle et le Top 2 sur 50 ticks sont inchangés. Les estimations restent celles du prochain tick : elles ne sont pas calibrées pour les durées supérieures à 1 tick.
 
 ## Limites de validation
 

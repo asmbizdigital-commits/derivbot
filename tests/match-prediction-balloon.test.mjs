@@ -62,3 +62,12 @@ test("V2 popup shows live estimates and last digit while keeping the traded digi
   assert.equal((html.match(/disabled=""/g) ?? []).length, 10);
   assert.match(render([], { fixedContract: { digit: 1, duration: 1 } }), /Dernier digit reçu : indisponible/);
 });
+
+test("V3.1 popup identifies manual threshold and contract duration", () => {
+  const html = render(Array(50).fill(7), {
+    strategyRules: { ...context.rules, selectionMode: "top_two_adaptive" },
+    quoteGuard: { minimumTicks: 200, status: "Prêt", duration: 6, minimumProbability: 0.09 },
+  });
+  assert.match(html, /Seuil : 9\.00% \(manuel\) · Durée : 6 tick/);
+  assert.match(html, /Estimation du prochain tick, non calibrée pour cette durée/);
+});

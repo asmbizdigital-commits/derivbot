@@ -54,14 +54,15 @@ export function dbxV3BudgetAllows(netProfit: number, stake: number, budgetStakes
 // A descriptive historical bound, not a calibrated next-tick probability.
 // z=2.576 applies a one-sided 0.5% Wilson tail per digit (10 digits).
 // Repeated selection, dependence and market drift invalidate a coverage promise.
-export function evaluateDbxV3Quote(candidate: { digit: number; probability: number } | null, ticks: number[], pipSize: number, ask: number, payout: number) {
+export function evaluateDbxV3Quote(candidate: { digit: number; probability: number } | null, ticks: number[], pipSize: number, ask: number, payout: number, minimumProbability: number | null = null) {
   const prices = ticks.slice(-DBX_V3_GUARD.minimumTicks);
-  const valid = !!candidate && Number.isInteger(candidate.digit) && candidate.digit >= 0 && candidate.digit <= 9
+  const validThreshold = minimumProbability === null || (Number.isFinite(minimumProbability) && minimumProbability >= 0 && minimumProbability <= 1);
+  const valid = validThreshold && !!candidate && Number.isInteger(candidate.digit) && candidate.digit >= 0 && candidate.digit <= 9
     && Number.isFinite(candidate.probability) && candidate.probability >= 0 && candidate.probability <= 1
     && Number.isInteger(pipSize) && pipSize >= 0 && pipSize <= 20
     && prices.length >= DBX_V3_GUARD.minimumTicks && prices.every((price) => Number.isFinite(price) && Math.abs(price) < 1e21)
     && Number.isFinite(ask) && ask > 0 && Number.isFinite(payout) && payout > ask;
-  if (!valid) return { accepted: false, sampleSize: prices.length, frequency: 0, lowerFrequency: 0, conservativeProbability: 0, breakEven: null, expectedValue: null, conservativeExpectedValue: null };
+  if (!valid) return { accepted: false, sampleSize: prices.length, frequency: 0, lowerFrequency: 0, conservativeProbability: 0, requiredProbability: null, breakEven: null, expectedValue: null, conservativeExpectedValue: null };
   const count = prices.filter((price) => Number(price.toFixed(pipSize).at(-1)) === candidate!.digit).length;
   const frequency = count / prices.length;
   const z2 = 2.576 ** 2;
@@ -71,6 +72,7 @@ export function evaluateDbxV3Quote(candidate: { digit: number; probability: numb
   const breakEven = ask / payout; // Payout is gross; net win is payout minus ask.
   const expectedValue = candidate!.probability * payout - ask;
   const conservativeExpectedValue = conservativeProbability * payout - ask;
-  return { accepted: conservativeExpectedValue >= ask * DBX_V3_GUARD.minimumReturnOnStake,
+  const requiredProbability = minimumProbability ?? breakEven * (1 + DBX_V3_GUARD.minimumReturnOnStake);
+  return { accepted: conservativeProbability + 1e-12 >= requiredProbability, requiredProbability,
     sampleSize: prices.length, frequency, lowerFrequency, conservativeProbability, breakEven, expectedValue, conservativeExpectedValue };
 }

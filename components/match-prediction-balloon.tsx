@@ -13,7 +13,7 @@ type MatchPredictionBalloonProps = {
   selectedDigit: number;
   strategyRules?: MatchStrategyRules;
   fixedContract?: { digit: number; duration: number };
-  quoteGuard?: { minimumTicks: number; status: string };
+  quoteGuard?: { minimumTicks: number; status: string; duration?: number; minimumProbability?: number | null };
   onClose: () => void;
   onOpen: () => void;
   onSelectDigit: (digit: number) => void;
@@ -96,7 +96,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
         <div><small>{lastDigitMode ? "FRÉQUENCE OBSERVÉE" : adaptive ? "ESTIMATION NON CALIBRÉE" : "PROBABILITÉ MODÉLISÉE"}</small><b>{candidate ? `${(candidate.probability * 100).toFixed(1)}%` : "-"}</b><p>{predictionStatus}</p></div>
       </div>
 
-      {quoteGuard && <p className="digit-balloon-note" aria-live="polite"><b>Contrôle payout V3.1 · {Math.min(liveTicks.length, quoteGuard.minimumTicks)}/{quoteGuard.minimumTicks} ticks</b><br/>{quoteGuard.status}</p>}
+      {quoteGuard && <p className="digit-balloon-note" aria-live="polite"><b>Contrôle payout V3.1 · {Math.min(liveTicks.length, quoteGuard.minimumTicks)}/{quoteGuard.minimumTicks} ticks</b><br/>Seuil : {quoteGuard.minimumProbability == null ? "automatique selon le payout" : `${(quoteGuard.minimumProbability * 100).toFixed(2)}% (manuel)`} · Durée : {quoteGuard.duration ?? 1} tick(s)<br/>{quoteGuard.status}{(quoteGuard.duration ?? 1) > 1 && <><br/>Estimation du prochain tick, non calibrée pour cette durée.</>}</p>}
 
       <div className="match-refresh-status match-last-tick" aria-live="polite" aria-atomic="true"><Clock3/><span>Dernier digit reçu <small>{lastQuote === null ? "En attente de tick" : `Dernier tick : ${lastQuote}`}</small></span><b aria-label={`Dernier digit reçu : ${lastDigit ?? "indisponible"}`}>{lastDigit ?? "—"}</b></div>
 
