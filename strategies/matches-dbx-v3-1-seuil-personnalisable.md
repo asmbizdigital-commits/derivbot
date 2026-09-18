@@ -55,3 +55,7 @@ Avant Play, utiliser **Mode du digit** :
 - **Manuel** : sélectionner un entier de **0 à 9**, conservé pour chaque contrat jusqu’à modification. Exemple d’import : remplacer ces deux propriétés par `"barrierMode": "fixed"` et `"fixedDigit": 0` pour trader le digit zéro. Le digit n’a pas besoin d’être dans le Top 2.
 
 Le popup affiche le digit manuel et **son** estimation. Le seuil, le contrôle des cotations et le budget de perte restent appliqués. Choisir un digit manuellement ne force donc pas l’achat. Les changements sont bloqués pendant le trading ou tant qu’une cotation, un achat ou un contrat est en cours.
+
+## Durée et délai d’exécution
+
+Une durée de 1 tick est envoyée telle quelle à Deriv. La prédiction suit le flux de marché ; la demande de cotation puis l’achat prennent du temps avant l’entrée du contrat. Le règlement est confirmé séparément par Deriv. Le suivi affiche la durée du contrat, les heures d’entrée/sortie reçues et distingue l’attente du tick d’entrée du règlement. Il ne faut pas assimiler tout ce délai à une durée de 2 ticks.

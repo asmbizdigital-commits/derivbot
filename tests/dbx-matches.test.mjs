@@ -297,7 +297,7 @@ test("V3.1 buy gate rejects expired quotes, changed digits and depleted budget",
 
 test("V3.1 stops on an unknown settlement profit instead of treating it as zero", () => {
   const begin = page.indexOf("        if (isSold && profit === null");
-  const end = page.indexOf("        const ticksElapsed", begin);
+  const end = page.indexOf("        setDerivDeals", begin);
   assert.ok(begin > 0 && end > begin);
   const halted = [];
   const context = vm.createContext({ isSold: true, profit: null, openContract: { contract_id: 123 },
@@ -502,7 +502,7 @@ test("statistical Matches imports duration and sends it unchanged to the automat
   const context = vm.createContext({
     digitSignal: { contractType: "DIGITMATCH", barrier: 7, reason: "Top 2", confidence: 10 },
     currentContractType: "DIGITMATCH", currentMatchStrategy: profile, currentTicks: [100.007], fixedDigitBarrier: null,
-    priceSignal: null, stake: 5, socket: {}, derivMarketRef: { current: "1HZ50V" }, derivDigitBarrierRef: { current: 7 },
+    isRunContract: false, priceSignal: null, stake: 5, socket: {}, derivMarketRef: { current: "1HZ50V" }, derivDigitBarrierRef: { current: 7 },
     derivHalfBalanceRiskEnabledRef: { current: false }, derivMartingaleEnabledRef: { current: false },
     isFastMatchMode: () => true, getContractCategory: () => "matches_differs", formatDerivContract: () => "Matches 7",
     chooseDerivContractDuration: () => { throw new Error("Matches must not use adaptive duration"); },

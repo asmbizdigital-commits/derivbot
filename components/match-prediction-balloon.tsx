@@ -102,6 +102,7 @@ export function MatchPredictionBalloon({ open, connected, marketName, pipSize, t
 
       {quoteGuard && <p className="digit-balloon-note" aria-live="polite"><b>Contrôle payout V3.1 · {Math.min(liveTicks.length, quoteGuard.minimumTicks)}/{quoteGuard.minimumTicks} ticks</b><br/>Seuil : {quoteGuard.minimumProbability == null ? "automatique selon le payout" : `${(quoteGuard.minimumProbability * 100).toFixed(2)}% (manuel)`} · Durée : {quoteGuard.duration ?? 1} tick(s)<br/>{quoteGuard.minimumProbability == null ? "Comparaison : estimation prudente et payout." : "Comparaison : estimation du modèle ; le score le plus faible pendant la cotation est retenu."}<br/>{quoteGuard.status}{(quoteGuard.duration ?? 1) > 1 && <><br/>Estimation du prochain tick, non calibrée pour cette durée.</>}</p>}
 
+      <p className="digit-balloon-note">Ce flux suit le marché en direct. Le tick affiché n’est pas nécessairement celui du contrat : la cotation et l’achat précèdent l’entrée confirmée par Deriv. Le règlement peut arriver après le tick de sortie.</p>
       <div className="match-refresh-status match-last-tick" aria-live="polite" aria-atomic="true"><Clock3/><span>Dernier digit reçu <small>{lastQuote === null ? "En attente de tick" : `Dernier tick : ${lastQuote}`}</small></span><b aria-label={`Dernier digit reçu : ${lastDigit ?? "indisponible"}`}>{lastDigit ?? "—"}</b></div>
 
       {lastDigitMode && <div className="match-model-grid match-top-two-observed" aria-label="Les deux digits les plus fréquents">

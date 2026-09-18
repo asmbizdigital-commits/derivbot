@@ -12,6 +12,7 @@ import { OverUnderPairPanel } from "@/components/over-under-pair-panel";
 import { OverUnderPairScanner, EMPTY_PAIR_STATS, pairBalanceAllows, type PairRow, type PairTrade, type PairStats } from "@/lib/over-under-pair";
 import { DBX_MATCH_CONFIG, DBX_DYNAMIC_MATCH_CONFIG, DBX_LAST_DIGIT_CONFIG, DBX_V3_GUARD, dbxV3BudgetAllows, evaluateDbxV3Quote, isDbxMode, buildDbxMatchOrder, validDbxQuote } from "@/lib/dbx-matches";
 import { DEFAULT_MATCH_STRATEGY_RULES, buildMatchPrediction, evaluateMatchQuote, isFastMatchMode, type MatchCandidate, type MatchStrategyRules } from "@/lib/match-prediction";
+import { updateContractProgress, contractPhaseLabel, type ContractProgressUpdate } from "@/lib/deriv-contract-progress";
 import { DERIV_MARKETS, DERIV_MARKET_PIP_SIZES, isDerivMarketSymbol, type DerivMarketSymbol } from "@/lib/deriv-markets";
 
 const pricePaths = {
@@ -94,8 +95,8 @@ type Mt5Tick = {
 };
 
 type DerivStatus = "connecting" | "public" | "demo" | "real" | "error";
-type DerivContractCategory = "rise_fall" | "matches_differs" | "over_under" | "even_odd" | "touch_no_touch";
-type DerivContractCode = "CALL" | "PUT" | "DIGITMATCH" | "DIGITDIFF" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD" | "ONETOUCH" | "NOTOUCH";
+type DerivContractCategory = "rise_fall" | "matches_differs" | "over_under" | "even_odd" | "touch_no_touch" | "only_ups_downs";
+type DerivContractCode = "CALL" | "PUT" | "DIGITMATCH" | "DIGITDIFF" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD" | "ONETOUCH" | "NOTOUCH" | "RUNHIGH" | "RUNLOW";
 type DerivBarrier = number | string | null;
 
 type DerivProposal = {
@@ -114,6 +115,7 @@ type DerivPendingBuy = {
   dbx?: true;
   dbxLastDigit?: true;
   dbxGuardRequestedAt?: number;
+  runRequestedAt?: number;
   pair?: boolean;
   contractType: DerivContractCode;
   barrier: DerivBarrier;
@@ -155,7 +157,9 @@ type DerivDeal = {
   symbol: string;
   createdAt: string;
   duration: number;
-  ticksElapsed: number;
+  contractPhase?: "entry" | "active" | "settlement";
+  entryTime?: number;
+  exitTime?: number;
   status: "open" | "won" | "lost";
   profit: number | null;
   entrySpot: number | null;
@@ -231,6 +235,7 @@ const derivContractCategories: Record<DerivContractCategory, { name: string; des
   matches_differs: { name: "Matches / Differs", description: "Compare le dernier chiffre du tick final à la barrière choisie.", options: ["DIGITMATCH", "DIGITDIFF"] },
   over_under: { name: "Over / Under", description: "Gagne si le dernier chiffre finit strictement au-dessus ou en dessous de la barrière.", options: ["DIGITOVER", "DIGITUNDER"] },
   even_odd: { name: "Even / Odd", description: "Gagne selon la parité du dernier chiffre du tick final.", options: ["DIGITEVEN", "DIGITODD"] },
+  only_ups_downs: { name: "Only Ups / Only Downs", description: "Only Ups : chaque tick monte strictement après l’entrée. Only Downs : chaque tick descend strictement. Un tick égal ou contraire fait perdre le contrat.", options: ["RUNHIGH", "RUNLOW"] },
   touch_no_touch: { name: "Touch / No Touch", description: "Gagne si le prix touche, ou ne touche pas, une barrière cible pendant le contrat.", options: ["ONETOUCH", "NOTOUCH"] },
 };
 
@@ -245,6 +250,8 @@ const derivContractLabels: Record<DerivContractCode, string> = {
   DIGITODD: "Odd",
   ONETOUCH: "Touch",
   NOTOUCH: "No Touch",
+  RUNHIGH: "Only Ups",
+  RUNLOW: "Only Downs",
 };
 
 const derivStrategies: Record<DerivStrategy, { name: string; description: string }> = {
@@ -462,6 +469,7 @@ function toNumber(value: unknown) {
 }
 
 function getContractCategory(contractType: DerivContractCode): DerivContractCategory {
+  if (contractType === "RUNHIGH" || contractType === "RUNLOW") return "only_ups_downs";
   if (contractType === "CALL" || contractType === "PUT") return "rise_fall";
   if (contractType === "DIGITMATCH" || contractType === "DIGITDIFF") return "matches_differs";
   if (contractType === "DIGITOVER" || contractType === "DIGITUNDER") return "over_under";
@@ -480,7 +488,9 @@ function parseDerivContractCode(value: unknown): DerivContractCode {
     value === "DIGITEVEN" ||
     value === "DIGITODD" ||
     value === "ONETOUCH" ||
-    value === "NOTOUCH"
+    value === "NOTOUCH" ||
+    value === "RUNHIGH" ||
+    value === "RUNLOW"
   ) {
     return value;
   }
@@ -588,7 +598,6 @@ function mapDerivProfitTransaction(transaction: DerivApiProfitTransaction): Deri
     symbol: parseDerivHistorySymbol(transaction),
     createdAt: purchaseTime ? new Date(purchaseTime * 1000).toISOString() : new Date().toISOString(),
     duration: 1,
-    ticksElapsed: 1,
     status: profit >= 0 ? "won" : "lost",
     profit,
     entrySpot: null,
@@ -743,8 +752,9 @@ function getDerivDigitAutoSignal(ticks: number[], contractType: DerivContractCod
 }
 
 function chooseDerivContractDuration(contractType: DerivContractCode, ticks: number[]): DurationDecision {
+  if (contractType === "RUNHIGH" || contractType === "RUNLOW") return { duration: 2, label: "SÉRIE", reason: "Chaque tick doit conserver le sens choisi, sans égalité." };
   if (contractType.startsWith("DIGIT")) {
-    return { duration: 1, label: "DIGIT", reason: "Contrat digit exécuté sur le prochain tick" };
+    return { duration: 1, label: "DIGIT", reason: "Durée du contrat après son entrée confirmée par Deriv" };
   }
   return chooseDerivDuration(ticks);
 }
@@ -990,6 +1000,8 @@ export default function Home() {
 		  const [derivMultiplePositionsEnabled, setDerivMultiplePositionsEnabled] = useState(false);
 		  const [derivPositionCount, setDerivPositionCount] = useState(2);
 		  const [derivMatchPositionCount, setDerivMatchPositionCount] = useState(1);
+  const [derivRunDuration, setDerivRunDuration] = useState(2);
+  const derivRunDurationRef = useRef(2);
   const [derivContractCategory, setDerivContractCategory] = useState<DerivContractCategory>("rise_fall");
 	  const [derivContractType, setDerivContractType] = useState<DerivContractCode>("CALL");
 	  const [derivDigitBarrier, setDerivDigitBarrier] = useState(5);
@@ -1013,7 +1025,7 @@ export default function Home() {
   const derivConnected = derivStatus === "public" || derivTradeConnected;
   const mt5ConnectedMode: AccountMode | null = mt5Online && mt5Demo !== null ? (mt5Demo ? "demo" : "real") : null;
 	  const derivDurationDecision = useMemo(() => chooseDerivContractDuration(derivContractType, derivTicks), [derivContractType, derivTicks]);
-	  const derivDuration = derivContractType === "DIGITMATCH" ? matchStrategy.durationTicks ?? 1 : derivDurationDecision.duration;
+	  const derivDuration = derivContractType === "DIGITMATCH" ? matchStrategy.durationTicks ?? 1 : derivContractType === "RUNHIGH" || derivContractType === "RUNLOW" ? derivRunDuration : derivDurationDecision.duration;
 	  const derivBalanceRiskStake = getBalanceRiskStake(derivStake, derivHalfBalanceRiskEnabled, derivBalance);
 	  const derivBaseRiskStake = derivHalfBalanceRiskEnabled ? derivBalanceRiskStake : getDoubleRiskStake(derivBalanceRiskStake, derivDoubleRiskEnabled, derivDoubleRiskSeriesIndex);
 	  const derivNextSeriesStake = derivHalfBalanceRiskEnabled ? derivBalanceRiskStake : getDoubleRiskStake(derivBalanceRiskStake, derivDoubleRiskEnabled, derivDoubleRiskSeriesIndex + 1);
@@ -1336,6 +1348,17 @@ export default function Home() {
                 return;
               }
             }
+            if (autoQuote.contractType === "RUNHIGH" || autoQuote.contractType === "RUNLOW") {
+              const signal = buildRiseFallSignal(derivTicksRef.current, derivStrategyRef.current);
+              const age = autoQuote.runRequestedAt === undefined ? Infinity : Date.now() - autoQuote.runRequestedAt;
+              if (age < 0 || age > 3000 || derivMarketRef.current !== autoQuote.symbol
+                || derivContractTypeRef.current !== autoQuote.contractType || autoQuote.duration !== derivRunDurationRef.current
+                || signal?.direction !== (autoQuote.contractType === "RUNHIGH" ? "CALL" : "PUT")
+                || !validDbxQuote(proposal.ask_price, proposal.payout ?? 0, autoQuote.stake, derivBalanceRef.current)) {
+                setDerivAutoStatus("Only Ups / Only Downs · cotation périmée, signal modifié ou fonds insuffisants · aucun achat");
+                return;
+              }
+            }
             if (autoQuote.dbxLastDigit) {
               const current = buildMatchPrediction(derivTicksRef.current, derivPipSizeRef.current, null, derivMatchStrategyRef.current.rules);
               if (derivMarketRef.current !== autoQuote.symbol || current.bestCandidate?.digit !== autoQuote.barrier) {
@@ -1398,9 +1421,9 @@ export default function Home() {
         }
         derivOpenContractRef.current = derivOpenContractsRef.current.size > 0;
         derivLastTradeSerialRef.current = derivTickSerialRef.current;
-        setDerivDeals((current) => [{ contractId: buy.contract_id!, buyPrice: buy.buy_price ?? pending.stake, payout: buy.payout ?? 0, contractType: pending.contractType, barrier: pending.barrier, symbol: pending.symbol, createdAt: new Date().toISOString(), duration: pending.duration, ticksElapsed: 0, status: "open" as const, profit: null, entrySpot: null, currentSpot: null }, ...current].slice(0, 24));
+        setDerivDeals((current) => [{ contractId: buy.contract_id!, buyPrice: buy.buy_price ?? pending.stake, payout: buy.payout ?? 0, contractType: pending.contractType, barrier: pending.barrier, symbol: pending.symbol, createdAt: new Date().toISOString(), duration: pending.duration, status: "open" as const, profit: null, entrySpot: null, currentSpot: null }, ...current].slice(0, 24));
         setDerivProposal(null);
-        setDerivMessage(`Contrat #${buy.contract_id} en cours · 0/${pending.duration} ticks`);
+        setDerivMessage(`Contrat #${buy.contract_id} acheté · durée demandée : ${pending.duration} tick(s) · attente du tick d’entrée Deriv`);
         if (derivAutoRunningRef.current) setDerivAutoStatus(`Contrat #${buy.contract_id} en cours${pending.batchTotal ? ` · position ${pending.batchIndex}/${pending.batchTotal}` : ""}`);
         socket.send(JSON.stringify({ proposal_open_contract: 1, contract_id: buy.contract_id, subscribe: 1 }));
         if (!pending.pair && derivAutoRunningRef.current && pending.batchTotal && pending.batchIndex && pending.batchIndex < pending.batchTotal) {
@@ -1431,8 +1454,7 @@ export default function Home() {
             barrier: needsDigitBarrier(contractType) ? toNumber(contract.barrier) : null,
             symbol: contract.symbol ?? derivMarketRef.current,
             createdAt: contract.date_start ? new Date(contract.date_start * 1000).toISOString() : new Date().toISOString(),
-            duration: 5,
-            ticksElapsed: 0,
+            duration: 0,
             status: "open" as const,
             profit: null,
             entrySpot: null,
@@ -1444,7 +1466,7 @@ export default function Home() {
         openContracts.forEach((contract) => socket.send(JSON.stringify({ proposal_open_contract: 1, contract_id: contract.contract_id, subscribe: 1 })));
       }
 
-      const openContract = message.proposal_open_contract as {
+      const openContract = message.proposal_open_contract as (ContractProgressUpdate & {
         contract_id?: number;
         buy_price?: string | number;
         payout?: string | number;
@@ -1454,9 +1476,7 @@ export default function Home() {
         contract_type?: string;
         status?: string;
         is_sold?: boolean | number;
-        tick_count?: number;
-        tick_stream?: unknown[];
-      } | undefined;
+      }) | undefined;
       if (typeof openContract?.contract_id === "number") {
         const isSold = openContract.is_sold === true || openContract.is_sold === 1 || openContract.status === "won" || openContract.status === "lost";
         const profit = toNumber(openContract.profit);
@@ -1465,7 +1485,6 @@ export default function Home() {
           stopDerivAutoOnPnlLimit("DBX V3.1 · résultat net manquant : arrêt, reconnectez pour réconcilier le portefeuille");
           return;
         }
-        const ticksElapsed = typeof openContract.tick_count === "number" ? openContract.tick_count : Array.isArray(openContract.tick_stream) ? openContract.tick_stream.length : 0;
         setDerivDeals((current) => current.map((deal) => deal.contractId !== openContract.contract_id ? deal : {
           ...deal,
           buyPrice: toNumber(openContract.buy_price) ?? deal.buyPrice,
@@ -1473,7 +1492,7 @@ export default function Home() {
           profit,
           entrySpot: toNumber(openContract.entry_spot) ?? deal.entrySpot,
           currentSpot: toNumber(openContract.current_spot) ?? deal.currentSpot,
-          ticksElapsed: Math.min(Math.max(ticksElapsed, deal.ticksElapsed), deal.duration),
+          ...updateContractProgress(deal, openContract),
           status: isSold ? (openContract.status === "won" || (openContract.status !== "lost" && (profit ?? 0) > 0) ? "won" : "lost") : "open",
         }));
         if (isSold) {
@@ -1560,7 +1579,7 @@ export default function Home() {
           if (shouldStopForDbxBudget) stopDerivAutoOnPnlLimit("DBX V3.1 · budget de perte atteint · session arrêtée");
           if (shouldStopForStopLoss) stopDerivAutoOnPnlLimit(`Stop Loss atteint · ${formatUsd(derivSessionPnlRef.current)}`);
         } else {
-          setDerivMessage(`Contrat #${openContract.contract_id} en cours · ${ticksElapsed} tick${ticksElapsed > 1 ? "s" : ""} reçu${ticksElapsed > 1 ? "s" : ""}`);
+          setDerivMessage(`Contrat #${openContract.contract_id} · ${openContract.is_expired === true || openContract.is_expired === 1 ? "En attente du règlement Deriv" : "Suivi reçu · résultat en attente"}`);
         }
       }
     };
@@ -1790,6 +1809,7 @@ export default function Home() {
       setDerivAutoStatus("Attente balance Deriv pour risque 50%");
       return;
     }
+    const isRunContract = currentContractType === "RUNHIGH" || currentContractType === "RUNLOW";
     const isOverUnder = currentContractType === "DIGITOVER" || currentContractType === "DIGITUNDER";
     const overUnderMartingaleLimit = isOverUnder ? derivOverUnderMartingaleCyclesRef.current : null;
     const balanceRiskStake = getBalanceRiskStake(derivStakeRef.current, derivHalfBalanceRiskEnabledRef.current, derivBalanceRef.current);
@@ -1813,7 +1833,7 @@ export default function Home() {
 	        .filter((digit): digit is number => digit !== null))
 	      : new Set<number>();
 		    const digitSignal = currentContractType.startsWith("DIGIT") ? getDerivDigitAutoSignal(currentTicks, currentContractType, fixedDigitBarrier, derivPipSizeRef.current, derivOverUnderStrategyRef.current, excludedMatchDigits, currentMatchStrategy.rules, derivSessionContractsRef.current) : null;
-	    const priceSignal = currentContractType === "CALL" || currentContractType === "PUT" || needsTouchBarrier(currentContractType) ? buildRiseFallSignal(currentTicks, derivStrategyRef.current) : null;
+	    const priceSignal = currentContractType === "CALL" || currentContractType === "PUT" || needsTouchBarrier(currentContractType) || isRunContract ? buildRiseFallSignal(currentTicks, derivStrategyRef.current) : null;
 		    if (currentContractType.startsWith("DIGIT") && !digitSignal) {
 		      if (isOverUnder) {
 		        const transition = getUnderEightTransitionState(currentTicks, derivPipSizeRef.current);
@@ -1856,12 +1876,16 @@ export default function Home() {
       requestDerivOverUnderQuoteScan(socket, digitSignal.overUnderCandidates, stake);
       return;
     }
-    if ((currentContractType === "CALL" || currentContractType === "PUT" || needsTouchBarrier(currentContractType)) && !priceSignal) {
-      setDerivAutoStatus(`Analyse Rise/Fall · 80 ticks · ${derivStrategies[derivStrategyRef.current].name}`);
+    if ((currentContractType === "CALL" || currentContractType === "PUT" || needsTouchBarrier(currentContractType) || isRunContract) && !priceSignal) {
+      setDerivAutoStatus(`${isRunContract ? derivContractLabels[currentContractType] : "Analyse Rise/Fall"} · 80 ticks · ${derivStrategies[derivStrategyRef.current].name}`);
       return;
     }
-    const selectedContractType = digitSignal?.contractType ?? (needsTouchBarrier(currentContractType) ? currentContractType : priceSignal!.direction);
-    const duration = selectedContractType === "DIGITMATCH" ? currentMatchStrategy.durationTicks ?? 1 : (selectedContractType === "CALL" || selectedContractType === "PUT") && priceSignal
+    if (isRunContract && priceSignal?.direction !== (currentContractType === "RUNHIGH" ? "CALL" : "PUT")) {
+      setDerivAutoStatus(`${derivContractLabels[currentContractType]} · attente d’un signal dans le sens choisi`);
+      return;
+    }
+    const selectedContractType = digitSignal?.contractType ?? (needsTouchBarrier(currentContractType) || isRunContract ? currentContractType : priceSignal!.direction);
+    const duration = selectedContractType === "DIGITMATCH" ? currentMatchStrategy.durationTicks ?? 1 : isRunContract ? derivRunDurationRef.current : (selectedContractType === "CALL" || selectedContractType === "PUT") && priceSignal
       ? priceSignal.duration
       : chooseDerivContractDuration(selectedContractType, currentTicks).duration;
     const barrier = fixedDigitBarrier !== null && needsDigitBarrier(selectedContractType) ? normalizeDigitBarrier(selectedContractType, fixedDigitBarrier) : digitSignal?.barrier ?? (needsDigitBarrier(selectedContractType) ? normalizeDigitBarrier(selectedContractType, derivDigitBarrierRef.current) : needsTouchBarrier(selectedContractType) ? getDynamicTouchBarrier(currentTicks, selectedContractType) : null);
@@ -1881,12 +1905,12 @@ export default function Home() {
       derivTouchBarrierRef.current = barrier;
       setDerivTouchBarrier(barrier);
     }
-    const signalReason = digitSignal?.reason ?? (needsTouchBarrier(selectedContractType) ? `${derivContractLabels[selectedContractType]} dynamique · barrière ${barrier}` : priceSignal!.reason);
+    const signalReason = digitSignal?.reason ?? (isRunContract ? `${derivContractLabels[selectedContractType]} · signal directionnel ${derivStrategies[derivStrategyRef.current].name}` : needsTouchBarrier(selectedContractType) ? `${derivContractLabels[selectedContractType]} dynamique · barrière ${barrier}` : priceSignal!.reason);
     const signalConfidence = digitSignal?.confidence ?? priceSignal!.confidence;
     const martingaleSuffix = !derivHalfBalanceRiskEnabledRef.current && derivMartingaleEnabledRef.current && derivConsecutiveLossesRef.current > 0 ? ` · martingale ${formatUsd(stake)}` : "";
     const fixedBarrierSuffix = fixedDigitBarrier !== null ? ` · barrière fixe ${barrier}` : "";
     registerDerivSessionSignal();
-    setDerivAutoStatus(`${signalReason}${isFastMatchMode(currentMatchStrategy.rules.selectionMode) && currentContractType === "DIGITMATCH" ? "" : ` · confiance ${signalConfidence}%`}${fixedBarrierSuffix}${martingaleSuffix} · ${positionTotal} position${positionTotal > 1 ? "s" : ""}`);
+    setDerivAutoStatus(`${signalReason}${(isRunContract || isFastMatchMode(currentMatchStrategy.rules.selectionMode) && currentContractType === "DIGITMATCH") ? "" : ` · confiance ${signalConfidence}%`}${fixedBarrierSuffix}${martingaleSuffix} · ${positionTotal} position${positionTotal > 1 ? "s" : ""}`);
     setDerivMessage(`Signal automatique ${formatDerivContract(selectedContractType, barrier)} · ${positionTotal} proposition${positionTotal > 1 ? "s" : ""}`);
     requestDerivAutoPosition(socket, { contractType: selectedContractType, barrier, duration, stake, symbol: derivMarketRef.current, batchIndex: 1, batchTotal: positionTotal, overUnderCandidate: digitSignal?.overUnderCandidate, riseFallSignal: selectedContractType === "CALL" || selectedContractType === "PUT" ? priceSignal ?? undefined : undefined, matchCandidate: digitSignal?.matchCandidate });
   }
@@ -1948,8 +1972,8 @@ export default function Home() {
   function requestDerivAutoPosition(socket: WebSocket, input: DerivPendingBuy & { batchIndex: number; batchTotal: number }) {
     if (!derivAutoRunningRef.current || !isDerivTradingStatus(derivStatusRef.current) || socket.readyState !== WebSocket.OPEN) return;
     const reqId = ++derivReqIdRef.current;
-    derivAutoQuoteRef.current.set(reqId, { ...input, reqId });
-    setDerivAutoStatus(`Demande position ${input.batchIndex}/${input.batchTotal} · ${formatDerivContract(input.contractType, input.barrier)}`);
+    derivAutoQuoteRef.current.set(reqId, { ...input, ...(input.contractType === "RUNHIGH" || input.contractType === "RUNLOW" ? { runRequestedAt: Date.now() } : {}), reqId });
+    setDerivAutoStatus(`Cotation en attente · contrat pas encore acheté · position ${input.batchIndex ?? 1}/${input.batchTotal ?? 1} · ${formatDerivContract(input.contractType, input.barrier)}`);
     socket.send(JSON.stringify(buildDerivProposalRequest({
       contractType: input.contractType,
       barrier: input.barrier,
@@ -1962,6 +1986,8 @@ export default function Home() {
   }
 
   function buildDerivProposalRequest(input: { contractType: DerivContractCode; barrier: DerivBarrier; stake: number; currency: string; duration: number; symbol: string; reqId?: number }) {
+    if ((input.contractType === "RUNHIGH" || input.contractType === "RUNLOW")
+      && (!Number.isInteger(input.duration) || input.duration < 2 || input.duration > 5)) throw new Error("Only Ups / Only Downs : durée de 2 à 5 ticks requise");
     const request: Record<string, string | number> = {
       proposal: 1,
       amount: input.stake,
@@ -1976,6 +2002,15 @@ export default function Home() {
     if (needsTouchBarrier(input.contractType)) request.barrier = typeof input.barrier === "string" ? normalizeTouchBarrier(input.barrier) : "+1";
     if (input.reqId) request.req_id = input.reqId;
     return request;
+  }
+
+  function changeDerivRunDuration(nextDuration: number) {
+    if (!Number.isInteger(nextDuration) || nextDuration < 2 || nextDuration > 5
+      || derivAutoRunningRef.current || derivOpenContractsRef.current.size
+      || derivPendingBuysRef.current.size || derivAutoQuoteRef.current.size) return;
+    derivRunDurationRef.current = nextDuration;
+    setDerivRunDuration(nextDuration);
+    setDerivProposal(null);
   }
 
   function changeDerivContractCategory(nextCategory: DerivContractCategory) {
@@ -2484,7 +2519,9 @@ export default function Home() {
 	      const isPairedOverUnder = isMultiIndexOverUnder(derivOverUnderStrategy) && (derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER");
 	      const pairMode = derivOverUnderStrategy === "under8_transition" ? "under8_digit9" : "under5_over4";
           const pairSessionMatches = derivPairScannerRef.current?.mode === pairMode;
-	      const isOverUnderCategory = derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER";
+	      const isRunContract = derivContractType === "RUNHIGH" || derivContractType === "RUNLOW";
+          const runDurationControl = <><label>Durée en ticks<select aria-label="Durée Only Ups / Only Downs en ticks" value={derivRunDuration} disabled={derivAutoRunning || derivDeals.some((deal) => deal.status === "open")} onChange={(event) => changeDerivRunDuration(Number(event.target.value))}>{[2, 3, 4, 5].map((duration) => <option key={duration} value={duration}>{duration} ticks</option>)}</select></label><p>Chaque tick doit conserver le sens choisi. Disponibilité et payout confirmés par la cotation Deriv.</p></>;
+          const isOverUnderCategory = derivContractCategory === "over_under" || derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER";
 	      const martingaleCycleLabel = derivConsecutiveLosses > derivOverUnderMartingaleCycles ? "Cycle terminé" : `${Math.max(0, derivConsecutiveLosses)}/${derivOverUnderMartingaleCycles}`;
 	      return <section className="view-stack">
         <div className="view-heading"><div><p className="eyebrow">OPTIONS DIGITALES</p><h2>Terminal Deriv Bot</h2></div><div className="heading-actions"><Button className="secondary-action" onClick={() => navigate("derivhistory")}><WalletCards/> Historique des gains</Button><span className={`connection-chip ${derivConnected ? "online" : ""}`}><i/>{derivStatus === "real" ? "Compte réel connecté" : derivStatus === "demo" ? "Compte démo connecté" : derivStatus === "public" ? "Cours publics en direct" : "Connexion Deriv"}</span></div></div>
@@ -2492,7 +2529,7 @@ export default function Home() {
 	          <div className="deriv-main-column">
 	            <section className="panel deriv-market"><div className="panel-head"><div><p className="eyebrow">MARCHÉ DERIV</p><h3>{DERIV_MARKETS[derivMarket]} Index</h3></div><select value={derivMarket} onChange={(event) => changeDerivMarket(event.target.value)} aria-label="Marché Deriv">{(Object.entries(DERIV_MARKETS) as [DerivMarketSymbol, string][]).map(([market, label]) => <option key={market} value={market}>{label}</option>)}</select></div><div className="deriv-price"><b>{derivPrice === null ? "-" : derivPrice.toLocaleString("en-US", { minimumFractionDigits: derivPipSize, maximumFractionDigits: derivPipSize })}</b><span className={derivConnected ? "green" : "muted"}>{derivConnected ? "LIVE" : "HORS LIGNE"}</span></div><MiniChart name={chartName} ticks={chartTicks}/><div className="api-message"><Radio/>{derivMessage}</div></section>
 	            <section className="panel deriv-connect"><div className="panel-head"><div><p className="eyebrow">CONNEXION SÉCURISÉE</p><h3>Compte Deriv Options {derivStatus === "real" ? "réel" : "démo"}</h3></div><PlugZap className={derivTradeConnected ? "lime" : "muted"}/></div>{derivTradeConnected ? <div className="connected-account"><span><small>Balance Options · {derivStatus === "real" ? "réel" : "démo"}</small><b>{derivBalance === null ? "-" : `${formatUsd(derivBalance)} ${derivCurrency}`}</b></span><Button className="secondary-action" onClick={disconnectDerivAccount}>Déconnecter</Button></div> : <><div className="deriv-mode-switch account-mode-switch" role="group" aria-label="Type de compte Deriv"><button className={derivAccountMode === "demo" ? "selected" : ""} onClick={() => setDerivAccountMode("demo")}>Compte démo</button><button className={derivAccountMode === "real" ? "selected" : ""} onClick={() => setDerivAccountMode("real")}>Compte réel</button></div><div className="oauth-connect-card"><PlugZap/><span><b>Connexion OAuth Deriv directe</b><small>{derivServerConfig.oauthConfigured ? "Connectez-vous sur Deriv; aucun ID de compte ni jeton ne sera saisi dans le dashboard." : "Configurez DERIV_APP_ID dans .env.local ou Sites pour activer la redirection OAuth."}</small></span></div>{derivServerConfig.oauthSessionActive && <Button className="connect-button" disabled={derivStatus === "connecting"} onClick={() => connectDerivAccount()}><PlugZap/> Reprendre la session Deriv</Button>}<Button className="connect-button" disabled={derivStatus === "connecting" || !derivServerConfig.oauthConfigured} onClick={() => beginDerivOAuth()}><PlugZap/> Se connecter avec Deriv OAuth</Button><small className="security-note">Redirect URI à enregistrer dans Deriv API : {derivServerConfig.oauthRedirectUri || "https://deriv-ai-trader.javakikso.chatgpt.site/deriv-oauth/callback"}</small></>}</section>
-	            <section className="panel deal-log"><div className="panel-head"><p className="eyebrow">SUIVI DES CONTRATS</p><button className="text-button" onClick={() => navigate("derivhistory")}>Historique <ChevronDown/></button></div><div className="deal-session-summary"><span><small>Total gain/lost</small><b className={derivSessionPnl > 0 ? "green" : derivSessionPnl < 0 ? "red" : ""}>{derivSessionPnl > 0 ? "+" : ""}{formatUsd(derivSessionPnl)}</b></span><span><small>Contrats pris</small><b>{derivSessionContracts}</b></span><span><small>Trades gagnants</small><b className="green">{derivSessionWins}</b></span><span><small>Trades perdants</small><b className="red">{derivSessionLosses}</b></span><span><small>Signaux session</small><b>{derivMaxSignals > 0 ? `${derivSessionSignals}/${derivMaxSignals}` : derivSessionSignals}</b></span></div>{derivDeals.length ? <div className="deal-list">{derivDeals.map((deal) => <div className={`deal-row ${deal.status}`} key={deal.contractId}><span><b className={deal.status === "won" ? "green" : deal.status === "lost" ? "red" : "amber"}>{deal.status === "won" ? "GAGNÉ" : deal.status === "lost" ? "PERDU" : "EN COURS"}</b><small>{formatDerivContract(deal.contractType, deal.barrier)} · {deal.symbol} · #{deal.contractId}</small></span><span><small>{deal.status === "open" ? "Progression" : "Résultat"}</small><b>{deal.status === "open" ? `${deal.ticksElapsed}/${deal.duration} ticks` : `${(deal.profit ?? 0) >= 0 ? "+" : ""}${formatUsd(deal.profit ?? 0)}`}</b></span><span><small>{deal.status === "open" ? "Valeur actuelle" : "Paiement"}</small><b>{deal.status === "open" && deal.currentSpot !== null ? formatPrice(deal.currentSpot) : formatUsd(deal.status === "won" ? deal.buyPrice + (deal.profit ?? 0) : 0)}</b></span></div>)}</div> : <div className="large-empty compact"><Bot/><b>Aucun contrat acheté</b><small>Le résultat et le profit apparaîtront ici en temps réel.</small></div>}</section>
+	            <section className="panel deal-log"><div className="panel-head"><p className="eyebrow">SUIVI DES CONTRATS</p><button className="text-button" onClick={() => navigate("derivhistory")}>Historique <ChevronDown/></button></div><div className="deal-session-summary"><span><small>Total gain/lost</small><b className={derivSessionPnl > 0 ? "green" : derivSessionPnl < 0 ? "red" : ""}>{derivSessionPnl > 0 ? "+" : ""}{formatUsd(derivSessionPnl)}</b></span><span><small>Contrats pris</small><b>{derivSessionContracts}</b></span><span><small>Trades gagnants</small><b className="green">{derivSessionWins}</b></span><span><small>Trades perdants</small><b className="red">{derivSessionLosses}</b></span><span><small>Signaux session</small><b>{derivMaxSignals > 0 ? `${derivSessionSignals}/${derivMaxSignals}` : derivSessionSignals}</b></span></div>{derivDeals.length ? <div className="deal-list">{derivDeals.map((deal) => <div className={`deal-row ${deal.status}`} key={deal.contractId}><span><b className={deal.status === "won" ? "green" : deal.status === "lost" ? "red" : "amber"}>{deal.status === "won" ? "GAGNÉ" : deal.status === "lost" ? "PERDU" : contractPhaseLabel(deal.contractPhase)}</b><small>{formatDerivContract(deal.contractType, deal.barrier)} · {deal.symbol} · #{deal.contractId}</small>{deal.entryTime !== undefined && <small>Entrée Deriv : {new Date(deal.entryTime * 1000).toLocaleTimeString("fr-FR")}{deal.exitTime !== undefined ? ` · Sortie : ${new Date(deal.exitTime * 1000).toLocaleTimeString("fr-FR")}` : ""}</small>}</span><span><small>{deal.status === "open" ? "Durée du contrat" : "Résultat"}</small><b>{deal.status === "open" ? deal.duration > 0 ? `${deal.duration} tick${deal.duration > 1 ? "s" : ""}` : "À confirmer" : `${(deal.profit ?? 0) >= 0 ? "+" : ""}${formatUsd(deal.profit ?? 0)}`}</b></span><span><small>{deal.status === "open" ? "Valeur actuelle" : "Paiement"}</small><b>{deal.status === "open" && deal.currentSpot !== null ? formatPrice(deal.currentSpot) : formatUsd(deal.status === "won" ? deal.buyPrice + (deal.profit ?? 0) : 0)}</b></span></div>)}</div> : <div className="large-empty compact"><Bot/><b>Aucun contrat acheté</b><small>Le résultat et le profit apparaîtront ici en temps réel.</small></div>}</section>
 	          </div>
 		          <section className={`panel trade-ticket ${derivAutoRunning ? "auto-running" : ""}`}>
 		            <div className="panel-head"><div><p className="eyebrow">NOUVEAU CONTRAT</p><h3>{selectedContractCategory.name}</h3></div><span className="demo-badge">{derivStatus === "real" ? "COMPTE RÉEL" : "COMPTE DÉMO"}</span></div>
@@ -2539,15 +2576,15 @@ export default function Home() {
 	            </div>}
 	            {isPairedOverUnder && <OverUnderPairPanel mode={pairMode} rows={pairSessionMatches ? derivPairRows : []} trades={pairSessionMatches ? derivPairTrades : []} stats={pairSessionMatches ? derivPairStats : EMPTY_PAIR_STATS} stake={derivStake} currency={derivCurrency} running={derivAutoRunning} onStake={(value) => { derivStakeRef.current = value; setDerivStake(value); setDerivProposal(null); }}/>}
 	            {derivMode === "manual" ? <>
-	              {isOverUnderCategory ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
+	              {isOverUnderCategory ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "RUNHIGH" || contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "RUNHIGH" || contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "RUNLOW" || contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
 	              {needsDigitBarrier(derivContractType) && !isOverUnderCategory && <div className="digit-barrier"><label>Digit / barrière<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection rapide du digit">{selectedContractBarrierOptions.map((digit) => <button key={digit} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
               {needsTouchBarrier(derivContractType) && <div className="digit-barrier"><label>Barrière cible<input type="text" value={derivTouchBarrier} onChange={(event) => { setDerivTouchBarrier(event.target.value); setDerivProposal(null); }} onBlur={() => setDerivTouchBarrier(normalizeTouchBarrier(derivTouchBarrier))} placeholder="+1"/></label><small>Utilisez une barrière relative, par exemple +1 ou -1.5.</small></div>}
-	              <div className="ticket-fields"><label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); setDerivProposal(null); }}/></label><div className="auto-duration">{derivContractType === "DIGITMATCH" ? <><label>Durée manuelle en ticks<select aria-label="Durée Matches en ticks" value={matchStrategy.durationTicks ?? 1} disabled={derivAutoRunning} onChange={(event) => changeMatchDuration(Number(event.target.value))}>{Array.from({ length: 10 }, (_, i) => i + 1).map((duration) => <option key={duration} value={duration}>{duration} tick{duration > 1 ? "s" : ""}</option>)}</select></label><p>Durée choisie par vous, appliquée à chaque contrat. À modifier avant le lancement.</p></> : <><span>Durée choisie par le bot</span><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
+	              <div className="ticket-fields"><label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); setDerivProposal(null); }}/></label><div className="auto-duration">{isRunContract ? runDurationControl : derivContractType === "DIGITMATCH" ? <><label>Durée manuelle en ticks<select aria-label="Durée Matches en ticks" value={matchStrategy.durationTicks ?? 1} disabled={derivAutoRunning} onChange={(event) => changeMatchDuration(Number(event.target.value))}>{Array.from({ length: 10 }, (_, i) => i + 1).map((duration) => <option key={duration} value={duration}>{duration} tick{duration > 1 ? "s" : ""}</option>)}</select></label><p>Durée choisie par vous, appliquée à chaque contrat. Le délai de cotation, d’achat et de règlement s’ajoute au temps observé. À modifier avant le lancement.</p></> : <><span>Durée choisie par le bot</span><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
               <Button className="quote-button" disabled={!derivConnected} onClick={requestDerivProposal}><RefreshCw/> Obtenir une proposition</Button>
-              {derivProposal ? <div className="proposal-card"><span>Contrat<b>{formatDerivContract(derivProposal.contractType, derivProposal.barrier)}</b></span><span>Prix du contrat<b>{formatUsd(derivProposal.askPrice)}</b></span><span>Paiement potentiel<b>{formatUsd(derivProposal.payout)}</b></span><p>{derivProposal.longcode}</p><Button disabled={!derivTradeConnected} onClick={buyDerivContract}><LockKeyhole/> Acheter sur le compte {derivStatus === "real" ? "réel" : "démo"}</Button>{!derivTradeConnected && <small>Connectez un compte Options pour acheter.</small>}</div> : <div className="ticket-empty">Choisissez le type de contrat, l’action et la mise. Le bot calcule automatiquement la durée avant la proposition.</div>}
+              {derivProposal ? <div className="proposal-card"><span>Contrat<b>{formatDerivContract(derivProposal.contractType, derivProposal.barrier)}</b></span><span>Prix du contrat<b>{formatUsd(derivProposal.askPrice)}</b></span><span>Paiement potentiel<b>{formatUsd(derivProposal.payout)}</b></span><p>{derivProposal.longcode}</p><Button disabled={!derivTradeConnected} onClick={buyDerivContract}><LockKeyhole/> Acheter sur le compte {derivStatus === "real" ? "réel" : "démo"}</Button>{!derivTradeConnected && <small>Connectez un compte Options pour acheter.</small>}</div> : <div className="ticket-empty">Choisissez le type de contrat, l’action et la mise, puis vérifiez la durée avant la proposition.</div>}
             </> : <>
-		              {derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : derivContractType === "CALL" || derivContractType === "PUT" ? <div className="direction-control contract-options"><button className="selected rise" disabled><ArrowUp/>Hausse auto</button><button className="selected fall" disabled><ArrowDown/>Baisse auto</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} disabled={derivAutoRunning} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
-	              <div className="auto-contract-summary"><span>Contrat automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "CALL" || derivContractType === "PUT" ? "Direction et durée automatiques" : derivContractType === "DIGITMATCH" ? `Matches ${derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : derivContractType.startsWith("DIGIT") ? `${derivContractLabels[derivContractType]} ${needsDigitBarrier(derivContractType) && derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : needsTouchBarrier(derivContractType) ? `${derivContractLabels[derivContractType]} dynamique` : formatDerivContract(derivContractType, null)}</b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <small>{derivOverUnderStrategies[derivOverUnderStrategy].description}</small> : derivContractType === "CALL" || derivContractType === "PUT" ? <small>Le modèle compare Hausse et Baisse sur 8, 21 et 55 ticks, puis contrôle le payout avant achat.</small> : derivContractType === "DIGITMATCH" ? <small>Le bot utilise la stratégie Matches importée ou le profil avancé par défaut, puis achète uniquement les signaux qualifiés.</small> : needsDigitBarrier(derivContractType) && <small>{derivAutoDigitBarrierMode === "fixed" ? `Le bot garde la barrière ${derivDigitBarrier} pour la série de trades.` : "Le bot choisit le digit au moment du signal."}</small>}{needsTouchBarrier(derivContractType) && <small>Le bot calcule une barrière relative selon la volatilité récente.</small>}</div>
+		              {derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <div className="direction-control contract-options"><button className={`selected ${derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? "rise" : "fall"}`} disabled>{derivOverUnderStrategies[derivOverUnderStrategy].contractType === "DIGITOVER" ? <ArrowUp/> : <ArrowDown/>}{derivOverUnderStrategies[derivOverUnderStrategy].name}</button><button disabled><Target/>{getOverUnderStrategySummary(derivOverUnderStrategy)}</button></div> : derivContractType === "CALL" || derivContractType === "PUT" ? <div className="direction-control contract-options"><button className="selected rise" disabled><ArrowUp/>Hausse auto</button><button className="selected fall" disabled><ArrowDown/>Baisse auto</button></div> : <div className="direction-control contract-options">{selectedContractCategory.options.map((contractType) => <button key={contractType} disabled={derivAutoRunning} className={`${derivContractType === contractType ? "selected" : ""} ${contractType === "RUNHIGH" || contractType === "CALL" || contractType === "DIGITOVER" || contractType === "DIGITEVEN" || contractType === "DIGITMATCH" || contractType === "ONETOUCH" ? "rise" : "fall"}`} onClick={() => changeDerivContractType(contractType)}>{contractType === "RUNHIGH" || contractType === "CALL" || contractType === "DIGITOVER" || contractType === "ONETOUCH" ? <ArrowUp/> : contractType === "RUNLOW" || contractType === "PUT" || contractType === "DIGITUNDER" ? <ArrowDown/> : <Target/>}{derivContractLabels[contractType]}</button>)}</div>}
+	              <div className="auto-contract-summary"><span>Contrat automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "CALL" || derivContractType === "PUT" ? "Direction et durée automatiques" : derivContractType === "DIGITMATCH" ? `Matches ${derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : derivContractType.startsWith("DIGIT") ? `${derivContractLabels[derivContractType]} ${needsDigitBarrier(derivContractType) && derivAutoDigitBarrierMode === "fixed" ? derivDigitBarrier : "dynamique"}` : needsTouchBarrier(derivContractType) ? `${derivContractLabels[derivContractType]} dynamique` : formatDerivContract(derivContractType, null)}</b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? <small>{derivOverUnderStrategies[derivOverUnderStrategy].description}</small> : derivContractType === "CALL" || derivContractType === "PUT" ? <small>Le modèle compare Hausse et Baisse sur 8, 21 et 55 ticks, puis contrôle le payout avant achat.</small> : derivContractType === "DIGITMATCH" ? <small>Le bot utilise la stratégie Matches importée ou le profil avancé par défaut, puis achète uniquement les signaux qualifiés.</small> : needsDigitBarrier(derivContractType) && <small>{derivAutoDigitBarrierMode === "fixed" ? `Le bot garde la barrière ${derivDigitBarrier} pour la série de trades.` : "Le bot choisit le digit au moment du signal."}</small>}{isRunContract && <small>Le bot conserve le sens et la durée choisis. La stratégie directionnelle filtre les entrées ; son score Rise/Fall ne mesure pas la probabilité de réussir une série Only Ups / Only Downs.</small>}{needsTouchBarrier(derivContractType) && <small>Le bot calcule une barrière relative selon la volatilité récente.</small>}</div>
 	              {derivContractType === "DIGITMATCH" && <label className="strategy-select">Liste des stratégies Matches<select aria-label="Stratégie Matches" value={matchStrategySelection} disabled={derivAutoRunning} onChange={(event) => selectMatchStrategy(event.target.value)}><option value="advanced">Matches avancé</option><option value="dbx">{DBX_MATCH_CONFIG.name}</option><option value="dbx_dynamic">{DBX_DYNAMIC_MATCH_CONFIG.name}</option><option value="dbx_last_digit">{DBX_LAST_DIGIT_CONFIG.name}</option>{importedMatchProfile && <option value="imported">{importedMatchProfile.name} (importée)</option>}</select></label>}
               {isDbxGuarded && <div className="match-strategy-card">
                 <b>Choix du digit DBX V3.1</b>
@@ -2572,7 +2609,7 @@ export default function Home() {
 	              <div className={`martingale-panel ${derivMaxSignals > 0 ? "enabled" : ""}`}><div className="martingale-toggle"><span><b>Limite signaux session</b><small>{derivMaxSignals > 0 ? `Stop automatique après ${derivMaxSignals} signal${derivMaxSignals > 1 ? "s" : ""}.` : "Illimité: le bot continue jusqu’au Stop manuel."}</small></span></div><div className="martingale-fields"><label>Nombre de signaux<input type="number" min="0" max="1000" step="1" disabled={derivAutoRunning} value={derivMaxSignals} onChange={(event) => setDerivMaxSignals(Math.min(1000, Math.max(0, Math.trunc(Number(event.target.value) || 0))))}/></label><span>Session <b>{derivMaxSignals > 0 ? `${derivSessionSignals}/${derivMaxSignals}` : "Illimité"}</b></span></div></div>
 	              {!isDbxMatch && needsDigitBarrier(derivContractType) && derivContractType !== "DIGITOVER" && derivContractType !== "DIGITUNDER" && derivAutoDigitBarrierMode === "fixed" && <div className="digit-barrier auto-fixed-barrier"><label>Digit / barrière fixe<input type="number" min={selectedContractBarrierOptions[0]} max={selectedContractBarrierOptions.at(-1)} step="1" disabled={derivAutoRunning} value={derivDigitBarrier} onChange={(event) => changeDerivDigitBarrier(Number(event.target.value))}/></label><div className="digit-quick-pick" role="group" aria-label="Sélection du digit fixe">{selectedContractBarrierOptions.map((digit) => <button key={digit} disabled={derivAutoRunning} className={derivDigitBarrier === digit ? "selected" : ""} onClick={() => changeDerivDigitBarrier(digit)}>{digit}</button>)}</div></div>}
 		              {derivContractType.startsWith("DIGIT") ? <div className="strategy-select auto-digit-strategy"><span>Stratégie automatique</span><b>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? derivOverUnderStrategies[derivOverUnderStrategy].name : derivContractType === "DIGITMATCH" ? matchStrategy.name : "Filtre statistique des derniers chiffres"}</b><small>{derivContractType === "DIGITOVER" || derivContractType === "DIGITUNDER" ? `${getOverUnderStrategySummary(derivOverUnderStrategy)} · ${derivOverUnderStrategies[derivOverUnderStrategy].description}` : derivContractType === "DIGITMATCH" ? isDbxLastDigit ? "DBX V4 classe les digits sur les 50 derniers ticks et attend que le dernier digit reçu soit le premier ou le deuxième plus fréquent. Elle achète Matches sur ce même digit, après nouvelle vérification à réception de la cotation. Ce déclencheur ne garantit pas le prochain résultat." : isDbxDynamic ? "DBX V3.1 utilise votre digit manuel ou choisit parmi le Top 2 sur 50 ticks, avec 200 ticks de contrôle. Le mode automatique utilise le score prudent ; le mode manuel utilise l’estimation du modèle. Le seuil et la durée se règlent avant Play. Les estimations concernent le prochain tick et ne sont pas calibrées pour une échéance de plusieurs ticks. Cotations périmées ou digit modifié : achat annulé." : isDbxMatch ? "Répète Matches sur le digit 1 après chaque clôture, avec la mise saisie (5 par défaut). Martingale et multiplicateurs ignorés, comme le montant fixe du XML. La limite de session du bot reste applicable." : matchStrategy.rules.selectionMode === "top_two_adaptive" ? `Choisit entre les deux chiffres les plus fréquents sur ${matchStrategy.rules.windowSize} ticks, sans alternance forcée. Compare fréquence, récence et transitions sur les résultats passés ; estimation non garantie.` : matchStrategy.rules.selectionMode === "top_two_frequency" ? `Alterne entre le premier et le deuxième chiffre les plus fréquents des ${matchStrategy.rules.windowSize} derniers ticks. Un contrat à la fois ; les fréquences passées ne sont pas des probabilités de gain.` : matchStrategy.rules.selectionMode === "frequency_window" ? `Prend uniquement DIGITMATCH sur le digit le plus fréquent des ${matchStrategy.rules.windowSize} derniers ticks si sa fréquence atteint ${(matchStrategy.rules.minimumProbability * 100).toFixed(0)}%.` : "Sélectionne un digit dynamique seulement quand les fenêtres statistiques, le contexte et le payout confirment une Edge positive." : derivContractType === "DIGITDIFF" ? "Differs: le bot sélectionne un digit sous-représenté pour réduire le risque de sortie identique." : "Le bot adapte la barrière selon la distribution récente des derniers chiffres."}</small></div> : <label className="strategy-select">Stratégie automatique<select value={derivStrategy} disabled={derivAutoRunning} onChange={(event) => { const strategy = event.target.value as DerivStrategy; derivStrategyRef.current = strategy; setDerivStrategy(strategy); }}><option value="trend">Tendance multi-horizon</option><option value="momentum">Impulsion filtrée</option><option value="reversal">Retournement confirmé</option></select><small>{derivStrategies[derivStrategy].description}</small></label>}
-	              <div className="ticket-fields auto-fields">{!isPairedOverUnder && <label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise fixe (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivAutoRunning || derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); }}/></label>}<div className="auto-duration"><span>{derivContractType === "DIGITMATCH" ? "Durée manuelle" : isPairedOverUnder ? "Durée par contrat" : "Durée adaptative"}</span>{derivContractType === "DIGITMATCH" ? <><label>Durée manuelle en ticks<select aria-label="Durée Matches en ticks" value={matchStrategy.durationTicks ?? 1} disabled={derivAutoRunning} onChange={(event) => changeMatchDuration(Number(event.target.value))}>{Array.from({ length: 10 }, (_, i) => i + 1).map((duration) => <option key={duration} value={duration}>{duration} tick{duration > 1 ? "s" : ""}</option>)}</select></label><p>Durée choisie par vous, appliquée à chaque contrat. À modifier avant le lancement.</p></> : isPairedOverUnder ? <><b>1 tick <small>FIXE</small></b><p>Deux contrats sur deux indices distincts.</p></> : derivContractType === "CALL" || derivContractType === "PUT" ? <><b>2 à 5 ticks <small>SIGNAL</small></b><p>Choisie selon la persistance ou l’accélération détectée.</p></> : <><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
+	              <div className="ticket-fields auto-fields">{!isPairedOverUnder && <label>{derivHalfBalanceRiskEnabled ? "Mise fallback (USD)" : "Mise fixe (USD)"}<input type="number" min="0.35" step="0.01" disabled={derivAutoRunning || derivHalfBalanceRiskEnabled} value={derivStake} onChange={(event) => { derivDoubleRiskSeriesIndexRef.current = 0; setDerivDoubleRiskSeriesIndex(0); setDerivStake(Number(event.target.value)); }}/></label>}<div className="auto-duration"><span>{derivContractType === "DIGITMATCH" || isRunContract ? "Durée manuelle" : isPairedOverUnder ? "Durée par contrat" : "Durée adaptative"}</span>{isRunContract ? runDurationControl : derivContractType === "DIGITMATCH" ? <><label>Durée manuelle en ticks<select aria-label="Durée Matches en ticks" value={matchStrategy.durationTicks ?? 1} disabled={derivAutoRunning} onChange={(event) => changeMatchDuration(Number(event.target.value))}>{Array.from({ length: 10 }, (_, i) => i + 1).map((duration) => <option key={duration} value={duration}>{duration} tick{duration > 1 ? "s" : ""}</option>)}</select></label><p>Durée choisie par vous, appliquée à chaque contrat. Le délai de cotation, d’achat et de règlement s’ajoute au temps observé. À modifier avant le lancement.</p></> : isPairedOverUnder ? <><b>1 tick <small>FIXE</small></b><p>Deux contrats sur deux indices distincts.</p></> : derivContractType === "CALL" || derivContractType === "PUT" ? <><b>2 à 5 ticks <small>SIGNAL</small></b><p>Choisie selon la persistance ou l’accélération détectée.</p></> : <><b>{derivDuration} ticks <small>{derivDurationDecision.label}</small></b><p>{derivDurationDecision.reason}</p></>}</div></div>
 	              <div className="auto-execution-status"><span className={derivAutoRunning ? "running" : ""}/><div><b>{derivAutoRunning ? "BOT EN MARCHE" : "BOT EN PAUSE"}</b><small>{derivAutoStatus}</small></div></div>
               <div className="auto-actions"><Button className="auto-play" disabled={derivAutoRunning || !derivTradeConnected} onClick={startDerivAuto}><Play/> Play</Button><Button className="auto-stop" disabled={!derivAutoRunning} onClick={stopDerivAuto}><Square/> Stop</Button></div>
 	              <small className="auto-disclaimer">{isDbxMatch ? `DBX : ${isDbxGuarded && matchStrategy.barrierMode === "fixed" ? `digit ${matchStrategy.fixedDigit} manuel` : isDbxDynamic ? "digit dynamique" : "digit 1 fixe"}, un contrat à la fois, mise constante. Répétition jusqu’au Stop ou à la limite de session choisie.` : isPairedOverUnder ? "Chaque paire ouvre deux contrats de 1 tick sur deux indices distincts. Stop annule les futures entrées ; les contrats engagés restent suivis." : `${derivMultiplePositionsEnabled ? `${derivPositionCount} positions par signal` : "Une seule position par signal"} · ${isMatchesDiffersContract(derivContractType) ? "aucun délai automatique pour Matches/Differs" : `pause entre trades ${derivTradePauseEnabled ? "ON: 8 ticks" : "OFF: aucun délai"}`} · arrêt manuel avec Stop. Martingale augmente fortement le risque.`} Aucune stratégie ne garantit un gain.</small>
@@ -2653,7 +2690,7 @@ export default function Home() {
         <footer><span><span className="pulse-dot"/> API sécurisée prête · EA v0.36 disponible</span><span>Moteur SMC/Risk v0.3 · Exécution réelle verrouillée</span></footer>
         </> : renderSecondaryView()}
       </div>
-      {activeView === "derivbot" && derivContractType !== "DIGITMATCH" && <DigitPredictionBalloon
+      {activeView === "derivbot" && derivContractType !== "DIGITMATCH" && derivContractType !== "RUNHIGH" && derivContractType !== "RUNLOW" && <DigitPredictionBalloon
         open={digitPredictionOpen}
         connected={derivConnected}
         marketName={DERIV_MARKETS[derivMarket]}
