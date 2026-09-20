@@ -20,3 +20,22 @@ services:
         sync: false
       - key: DERIV_OPTIONS_ACCOUNT_ID
         sync: false
+      # Existing private MySQL service: copy its connection settings here.
+      # The web service and MySQL must share the same region and workspace.
+      - key: COPYTRADING_STORAGE
+        value: mysql
+      - key: COPYTRADING_ADMIN_KEY
+        sync: false
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        value: "3306"
+      - key: MYSQL_DATABASE
+        value: derivbot
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      # Render private network. Enable TLS for a MySQL server configured for TLS.
+      - key: MYSQL_SSL
+        value: "false"

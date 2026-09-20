@@ -72,3 +72,24 @@
 .run-strategy-panel .strategy-select{min-width:0;margin-top:0}
 .run-strategy-panel select{width:100%;min-width:0;max-width:100%}
 .run-strategy-panel .match-strategy-import{justify-self:start}
+
+.copy-live .panel>p,.copy-live .panel>small{color:var(--muted);font-size:11px;line-height:1.6}
+.copy-live a{color:var(--lime)}
+.copy-live label{display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--muted)}
+.copy-live input,.copy-live select,.copy-live textarea{min-width:0;width:100%;background:#0b0e0e;border:1px solid var(--line);border-radius:7px;padding:10px;color:#eef2ed;font:12px Poppins,sans-serif}
+.copy-live button{border:1px solid #3b4938;border-radius:7px;background:#202820;color:var(--lime);padding:10px 13px;font:600 11px Poppins,sans-serif;cursor:pointer}
+.copy-live button:disabled{opacity:.45;cursor:not-allowed}
+.copy-admin-login,.copy-actions{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:16px 0}
+.copy-admin-login label{flex:1;min-width:200px}
+.copy-registration{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:20px}
+.copy-live .copy-check{display:flex;flex-direction:row;align-items:center;gap:10px;margin:15px 0}
+.copy-live .copy-check input{width:auto}
+.copy-map{grid-column:1/-1}.copy-map textarea{min-height:80px}
+.copy-issued{border-color:#b8f34a}.copy-issued label{margin:12px 0}.copy-issued button{margin-right:10px}
+.copy-live-table{overflow:auto;margin-top:18px}.copy-live-table table{border-collapse:collapse;width:100%;min-width:850px;font-size:11px}
+.copy-live-table th,.copy-live-table td{padding:12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.copy-account-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;min-width:245px}
+.copy-live-table td button{width:100%;font-size:10px;padding:8px;line-height:1.4}
+.copy-live-log{max-height:320px;overflow:auto;font-size:11px}.copy-live-log time{color:var(--muted)}
+@media(max-width:850px){.copy-registration{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.copy-registration{grid-template-columns:1fr}}

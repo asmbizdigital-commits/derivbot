@@ -43,3 +43,6 @@ next-env.d.ts
 /output/
 /tmp/
 /work/
+
+# Private MT5 copytrading state
+/.copytrading-data/
