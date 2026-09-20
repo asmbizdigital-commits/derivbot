@@ -118,6 +118,16 @@ Télécharger le nouveau `.mq5`, remplacer l’ancien fichier dans `MQL5/Experts
 
 L’EA master observe les positions sans ouvrir d’ordres. La copie des positions d’autres EA du compte master est donc possible. Sur les suiveurs, seules les positions portant le magic de la copie sont gérées. Ne pas faire gérer ces positions simultanément par un autre logiciel.
 
+### HTTP 409 « Terminal non authentifié » après changement de master
+
+Ce message signifie que la paire `AgentId` / `AgentKey` n’est pas celle du terminal enregistré. Ce refus précède la vérification du compte, du serveur et des positions. `AllowRealTrading=false` n’empêche pas le master de transmettre ses données ; cette permission concerne l’exécution des ordres sur les suiveurs réels.
+
+Recopier séparément les identifiants issus du remplacement du master. S’ils ne sont plus disponibles, cliquer sur **Régénérer les identifiants du master** dans le module : ce bouton est disponible avant la première connexion du nouveau master. Il remplace la clé, conserve l’AgentId, le login, le serveur et les suiveurs, puis affiche les deux valeurs à copier dans MT5. L’ancienne clé devient immédiatement invalide. Garder `Role=MASTER`, appliquer les paramètres et attendre l’état **En ligne** avant d’activer les suiveurs et de démarrer la copie. Les EA **1.04** déjà installés restent utilisables, sans recompilation.
+
+Le journal **Experts** de MT5 affiche le détail après `Copy API HTTP=409`. Les refus après authentification sont également affichés dans le module et son journal ; une transmission refusée ne remplace pas les dernières positions acceptées et ne délivre aucune commande. Une tentative avec des identifiants invalides ne modifie pas l’état d’un compte.
+
+Les suiveurs affichent l’attente ou le refus du master tant qu’il ne transmet pas. Une demande d’EA 1.04 concerne uniquement le terminal qui a effectivement transmis un protocole incompatible.
+
 ## 4. Démarrer, suivre et suspendre
 
 1. Vérifier que le master et les suiveurs apparaissent **en ligne**.

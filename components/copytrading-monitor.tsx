@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { AccountMetrics, Position } from "../lib/copytrading/engine";
 
 export type MonitorAccount = {
- id:string;label:string;account:string;server:string;mode:string;online:boolean;
+ connectionError?:string;id:string;label:string;account:string;server:string;mode:string;online:boolean;
  lastSeen:number;equity:number;metrics:AccountMetrics|null;hasTraded:boolean;
  positions:(Position & {copied:boolean})[];
 };

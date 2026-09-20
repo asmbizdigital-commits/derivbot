@@ -5,7 +5,7 @@ export type AccountMetrics = { balance:number; currency:string; floatingPnl:numb
 export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; magic: number; details?:PositionDetails };
 export type Settings = { multiplier: number; maxLot: number; maxTotalLots: number; lossLimitPct: number; reverse: boolean; symbols: Record<string, string> };
 export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; copyProtocol: 2; broker: string };
-export type Agent = { broker?: string; copyProtocol?: number; id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
+export type Agent = { connectionError?: string; broker?: string; copyProtocol?: number; id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
 type Binding = { execution?: "not_sent" | "not_opened" | "unknown" | "opened"; exact?: boolean; retired?: boolean; slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
 type ArchivedFollower = { at:number; agent:Omit<Agent,"tokenHash">; bindings:Binding[] };
 export type CopyState = { archivedFollowers?: ArchivedFollower[]; version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
@@ -60,7 +60,7 @@ export class CopyEngine {
   online(a: Pick<Agent,"lastSeen">) { return a.lastSeen > 0 && this.now()-a.lastSeen < 15000; }
   authenticate(id: string, token: string) {
     const a=this.state.agents.find(a=>a.id===id);
-    if (!a || !secretEqual(a.tokenHash,hash(token))) throw new Error("Terminal non authentifié");
+    if (!a || !secretEqual(a.tokenHash,hash(token))) throw new Error("Terminal non authentifié : vérifiez les AgentId et AgentKey du terminal actuel, notamment après un changement de master");
     return a;
   }
   register(input: Record<string, unknown>) {
@@ -105,6 +105,13 @@ export class CopyEngine {
     }
     const a=this.state.agents.find(a=>a.id===input.id);
     if (!a) throw new Error("Terminal inconnu");
+    if (input.action==="reset_master_credentials") {
+      if(!this.canEditMasterServer(a))throw new Error("Les identifiants ne peuvent être régénérés ici qu’avant la première connexion du nouveau master.");
+      const token=randomBytes(32).toString("hex");
+      a.tokenHash=hash(token);a.connectionError=undefined;
+      this.log(a.id,"Nouvelle clé de connexion du master générée ; ancienne clé révoquée, compte et suiveurs conservés");
+      return {id:a.id,token};
+    }
     if (input.action==="update_master_server") {
       if(!this.canEditMasterServer(a))throw new Error("Le serveur ne peut être corrigé qu’avant la première connexion du nouveau master. Utilisez Changer de master pour un terminal déjà connecté.");
       const server=str(input.server,"Serveur MT5");
@@ -183,9 +190,38 @@ export class CopyEngine {
       for(const p of master.positions)this.bind(a,p);
     this.state.baseline=master.positions;
   }
+  receiveHeartbeat(a:Agent,input:Record<string,unknown>) {
+    // Commit a rejection diagnostic without committing any partial heartbeat or command.
+    const next=new CopyEngine(structuredClone(this.state),this.now);
+    const agent=next.state.agents.find(x=>x.id===a.id)!;
+    try {
+      const result=next.heartbeat(agent,input);
+      agent.connectionError=undefined;
+      Object.assign(this.state,next.state);
+      return result;
+    } catch(error) {
+      const message=error instanceof Error?error.message:"Transmission MT5 invalide";
+      if(a.connectionError!==message)this.log(a.id,`Transmission MT5 refusée : ${message}`);
+      a.connectionError=message;
+      return {error:message};
+    }
+  }
+  private compatibilityError(a:Agent,master:Agent|undefined) {
+    if(!master)return "Master absent";
+    if(master.connectionError)return `Transmission du master refusée : ${master.connectionError}`;
+    if(!master.session)return "En attente de la première connexion du master";
+    if(!this.online(master))return "Master hors ligne : reconnectez son terminal MT5";
+    if(master.copyProtocol!==2)return "Installer l’EA 1.04 sur le master pour la copie identique";
+    if(!a.session)return "En attente de la première connexion du suiveur";
+    if(a.copyProtocol!==2)return "Installer l’EA 1.04 sur ce suiveur pour la copie identique";
+    if(!a.broker)return "Broker non transmis par le suiveur : vérifier son EA et le journal Experts";
+    return "";
+  }
   heartbeat(a:Agent,input:Record<string,unknown>) {
     if(input.role!==a.role)throw new Error("Rôle EA différent du terminal enregistré");
-    if(input.account!==a.account||input.server!==a.server||input.mode!==a.mode)throw new Error("Compte MT5 différent du compte enregistré");
+    if(input.account!==a.account)throw new Error(`Login MT5 différent : connectez le compte ${a.account} dans le terminal`);
+    if(input.server!==a.server)throw new Error(`Serveur MT5 différent : le module attend ${a.server}. Vérifiez le serveur du compte dans MT5`);
+    if(input.mode!==a.mode)throw new Error(`Type de compte MT5 différent : le module attend un compte ${a.mode==="real"?"réel":"démo"}`);
     if(a.role==="slave"&&input.hedging!==true)throw new Error("Le terminal suiveur doit utiliser un compte MT5 hedging");
     const session=str(input.session,"Session",80), seq=number(input.seq,1,Number.MAX_SAFE_INTEGER,"Séquence");
     if(!Number.isInteger(seq))throw new Error("Séquence invalide");
@@ -229,8 +265,7 @@ export class CopyEngine {
     }
     const master=this.state.agents.find(x=>x.role==="master");
     // Brokers/servers may differ from the master. Commands target the follower’s own identity.
-    const compatibilityError=!master?"Master absent":
-      a.copyProtocol!==2||master.copyProtocol!==2||!a.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":"";
+    const compatibilityError=this.compatibilityError(a,master);
     const canIncrease=this.state.enabled&&a.enabled&&!!master&&this.online(master)&&!compatibilityError;
     if(canIncrease&&master){
       // Migrate persisted caps/multipliers. Old commands must be acknowledged first.
@@ -268,13 +303,13 @@ export class CopyEngine {
   }
   snapshot() {
     const master=this.state.agents.find(a=>a.role==="master");
-    const compatibility=(a:Agent)=>a.role!=="slave"?"":a.copyProtocol!==2||master?.copyProtocol!==2||!a.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":"";
+    const compatibility=(a:Agent)=>a.role==="slave"?this.compatibilityError(a,master):"";
     return {
       enabled:this.state.enabled,limit:50,masterReplacementError:this.masterReplacementError(),
       agents:this.state.agents.map(a=>({
-        id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,canEditServer:this.canEditMasterServer(a),
+        id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,canEditServer:this.canEditMasterServer(a),canResetCredentials:this.canEditMasterServer(a),
         enabled:a.enabled,settings:parseSettings(),broker:a.broker??null,copyProtocol:a.copyProtocol??null,lastSeen:a.lastSeen,equity:a.equity,
-        sessionEquity:a.sessionEquity,pending:a.pending,error:a.error||compatibility(a),
+        sessionEquity:a.sessionEquity,pending:a.pending,connectionError:a.connectionError??"",error:a.connectionError||a.error||compatibility(a),
         online:this.online(a),positionCount:a.positions.length,
         metrics:a.metrics??null,hasTraded:!!a.hasTraded||a.positions.length>0||this.state.bindings.some(b=>b.slave===a.id&&b.opened),
         positions:a.positions.map(p=>({...p,copied:a.role==="slave"&&this.state.bindings.some(b=>b.slave===a.id&&b.magic===p.magic)})),

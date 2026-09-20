@@ -503,3 +503,62 @@ test('server correction rejects established accounts, duplicate registrations an
  e.register({role:'slave',label:'Existing',account:'101',server:'Taken',mode:'real'});
  for(const server of ['',null,'Taken']){const before=JSON.stringify(e.state);assert.throws(()=>e.admin({action:'update_master_server',id:m.id,server}));assert.equal(JSON.stringify(e.state),before);}
 });
+
+test('a new or disconnected master does not incorrectly require reinstalling follower EAs',()=>{
+ const h=harness(),s=h.slaves[0];
+ const replacement=h.e.admin(replacementInput(h));
+ let follower=h.e.snapshot().agents.find(a=>a.id===s.id);
+ assert.match(follower.error,/première connexion du master/);assert.doesNotMatch(follower.error,/Installer/);
+ const master={...replacement,a:h.e.state.agents.find(a=>a.id===replacement.id)};
+ h.hb(master,[]);assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).error,'');
+ h.tick(16000);assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/Master hors ligne/);
+ h.hb(master,[],{copyProtocol:undefined});assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/sur le master/);
+ h.hb(master,[]);h.hb(s,[],{copyProtocol:undefined});assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/sur ce suiveur/);
+});
+
+test('authenticated HTTP 409 diagnostics reach the dashboard without accepting a rejected snapshot',async()=>{
+ const h=harness();
+ const store={copyTransaction:async fn=>{const draft=new CopyEngine(structuredClone(h.e.state),()=>1000000);const result=fn(draft);h.e.state=draft.state;return result;},copyStorageInfo:()=>({persistent:true,configured:true})};
+ const api=moduleAt('app/api/copytrading/agent/route.ts',{'@/lib/copytrading/store':store}).exports;
+ const body={role:'master',account:h.master.a.account,server:'Wrong server',mode:'demo',session:'terminal',seq:2,equity:999,positions:[pos()]};
+ const request=(token=h.master.token)=>new Request('https://example.test/api/copytrading/agent',{method:'POST',headers:{'x-copy-agent-id':h.master.id,'x-copy-agent-key':token},body:JSON.stringify(body)});
+ const before=JSON.stringify(h.e.state);
+ assert.equal((await api.POST(request('f'.repeat(64)))).status,409);assert.equal(JSON.stringify(h.e.state),before,'unauthenticated callers cannot change account diagnostics');
+ let response=await api.POST(request());assert.equal(response.status,409);assert.match((await response.json()).error,/Serveur MT5 différent/);
+ let master=h.e.snapshot().agents.find(a=>a.id===h.master.id);
+ assert.match(master.connectionError,/Demo Server/);assert.equal(master.lastSeen,1000000);assert.equal(master.positionCount,0);assert.equal(master.equity,1000);
+ assert.match(h.e.snapshot().agents.find(a=>a.role==='slave').error,/Transmission du master refusée/);
+ const logs=h.e.state.logs.length;await api.POST(request());assert.equal(h.e.state.logs.length,logs,'identical refusals do not flood the journal');
+ body.server=h.master.a.server;response=await api.POST(request());assert.equal(response.status,200);
+ master=h.e.snapshot().agents.find(a=>a.id===h.master.id);assert.equal(master.connectionError,'');assert.equal(master.positionCount,1);assert.equal(master.equity,999);
+});
+
+test('refused acknowledgements preserve pending commands, positions and bindings while exposing the reason',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const command=h.hb(s).command;
+ const before=structuredClone(h.e.state);
+ const result=h.e.receiveHeartbeat(s.a,{role:'slave',account:s.a.account,server:s.a.server,mode:'demo',hedging:true,session:'terminal',seq:s.a.seq+1,equity:1,positions:[copied(command)],ack:{id:'unknown',status:'done'}});
+ assert.match(result.error,/Acquittement inconnu/);
+ assert.equal(JSON.stringify(h.e.state.bindings),JSON.stringify(before.bindings));
+ const agent=h.e.state.agents.find(a=>a.id===s.id),old=before.agents.find(a=>a.id===s.id);
+ assert.equal(JSON.stringify({...agent,connectionError:undefined}),JSON.stringify({...old,connectionError:undefined}));
+});
+
+test('regenerating an unconnected real master key revokes the old key and preserves follower identities',()=>{
+ const h=harness();const replacement=h.e.admin(replacementInput(h));
+ const master=h.e.state.agents.find(a=>a.id===replacement.id),slaves=JSON.stringify(h.e.state.agents.filter(a=>a.role==='slave'));
+ assert.equal(h.e.snapshot().agents.find(a=>a.id===master.id).canResetCredentials,true);
+ const reset=h.e.admin({action:'reset_master_credentials',id:master.id});
+ assert.equal(reset.id,replacement.id);assert.equal(reset.token.length,64);assert.notEqual(reset.token,replacement.token);
+ assert.throws(()=>h.e.authenticate(reset.id,replacement.token),/non authentifié/);
+ assert.equal(h.e.authenticate(reset.id,reset.token).account,master.account);
+ assert.equal(JSON.stringify(h.e.state.agents.filter(a=>a.role==='slave')),slaves);
+ assert.equal(h.e.state.enabled,false);assert.equal(h.e.state.baseline,null);
+ assert.ok(!JSON.stringify(h.e.snapshot()).includes(reset.token));assert.ok(!JSON.stringify(h.e.state).includes(reset.token));
+ h.hb({id:reset.id,token:reset.token,a:master},[pos()]);
+ assert.equal(h.e.snapshot().agents.find(a=>a.id===master.id).positionCount,1);
+ assert.equal(h.e.snapshot().agents.find(a=>a.id===master.id).canResetCredentials,false);
+ const before=JSON.stringify(h.e.state);
+ assert.throws(()=>h.e.admin({action:'reset_master_credentials',id:master.id}),/première connexion/);
+ assert.throws(()=>h.e.admin({action:'reset_master_credentials',id:h.slaves[0].id}),/première connexion/);
+ assert.equal(JSON.stringify(h.e.state),before);
+});

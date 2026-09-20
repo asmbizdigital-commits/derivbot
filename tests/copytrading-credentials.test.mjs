@@ -127,3 +127,19 @@ test('new master server correction submits only the server and keeps the issued 
  await view.nodes().find(n=>n.type==='form'&&n.props.className==='copy-registration').props.onSubmit({preventDefault(){}});view.render();
  assert.deepEqual(requests,[{action:'update_master_server',id:account.id,server:'Broker-Live-02'}]);assert.equal(view.button('Copier AgentId'),null);
 });
+
+test('master connection rejection is visible in the master panel',()=>{
+ const connectionError='Serveur MT5 différent : le module attend Live Server';
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:[{...masterSnapshot.agents[0],online:false,connectionError}]}});
+ assert.ok(view.nodes().some(n=>n.props?.role==='alert'&&Array.isArray(n.props.children)&&n.props.children.includes(connectionError)));
+});
+
+test('recovering the new master credentials displays both copy buttons without replacing the account',async()=>{
+ const requests=[],data={...masterSnapshot,agents:[{...masterSnapshot.agents[0],online:false,canResetCredentials:true}]};
+ const view=panel(async()=>{}, {data,fetch:async(url,input)=>{requests.push(JSON.parse(input.body));return {ok:true,json:async()=>({...data,result:{id:'old-master',token:'e'.repeat(64)}})};}});
+ view.click('Régénérer les identifiants du master');await new Promise(resolve=>setImmediate(resolve));view.render();
+ assert.deepEqual(requests,[{action:'reset_master_credentials',id:'old-master'}]);
+ assert.ok(view.button('Copier AgentId'));assert.ok(view.button('Copier AgentKey'));
+ assert.equal(view.button('Régénérer les identifiants du master').props.disabled,true);
+ const connected=panel(async()=>{}, {data:masterSnapshot});assert.equal(connected.button('Régénérer les identifiants du master'),null);
+});

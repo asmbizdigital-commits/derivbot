@@ -10,8 +10,8 @@ export async function POST(request:Request){
     const result=await copyTransaction(engine=>{
       const account=engine.authenticate(id,token);
       if(account.mode==="real"&&(!copyStorageInfo().persistent||!copyStorageInfo().configured))throw new Error("Stockage persistant requis pour un terminal réel");
-      return engine.heartbeat(account,input);
+      return engine.receiveHeartbeat(account,input);
     });
-    return Response.json(result,{headers:{"Cache-Control":"no-store"}});
+    return Response.json(result,{status:"error" in result?409:200,headers:{"Cache-Control":"no-store"}});
   }catch(error){return Response.json({error:error instanceof Error&&!("code" in error)?error.message:"Stockage indisponible, aucune commande délivrée"},{status:409,headers:{"Cache-Control":"no-store"}});}
 }
