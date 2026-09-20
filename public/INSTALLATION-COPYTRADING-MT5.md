@@ -124,6 +124,18 @@ Les snapshots MT5 sont transmis toutes les `PollSeconds` (2 s par défaut), et l
 
 Références : [propriétés des transactions MQL5](https://www.mql5.com/en/docs/constants/tradingconstants/dealproperties), [sélection de l’historique selon l’heure serveur](https://www.mql5.com/en/docs/trading/historyselect), [propriétés des positions](https://www.mql5.com/en/docs/constants/tradingconstants/positionproperties).
 
+### Plusieurs instruments et copies manquantes — EA 1.03
+
+Il n’existe pas de plafond de quatre positions. Les commandes sont acquittées **une par une par suiveur**, à chaque cycle ; un groupe de positions peut donc nécessiter plusieurs cycles. Les positions doivent être apparues après le démarrage de la copie, sauf reprise explicite des positions existantes.
+
+Le plafond **Maximum par copie** s’applique à chaque symbole. Par exemple, si le plafond vaut `0,01` lot et qu’un instrument exige `0,1` lot sur le suiveur, cette copie est refusée. Le volume n’est jamais remonté automatiquement au minimum du broker. Vérifier les **Spécifications** de chaque symbole dans MT5 et les limites serveur **et** terminal avant de modifier les réglages. Les instruments distincts, notamment les variantes `(1s)`, ne doivent pas être associés arbitrairement dans le mapping.
+
+Dans l’EA **1.03**, trois refus constatés **avant toute exécution d’une nouvelle copie** sont isolés : symbole indisponible, spécifications indisponibles et volume inférieur au minimum. La copie concernée est bloquée avec un motif précis, tandis que les autres copies compatibles continuent. La page distingue les copies ouvertes, celles en attente et les blocages ; **Voir les refus par symbole** affiche l’instrument, la position source et le détail du refus (volume demandé, volume arrondi, minimum et pas).
+
+Les refus broker après tentative d’exécution, résultats incertains et erreurs sur une copie existante continuent de mettre le suiveur en pause. Les limites de risque et leurs arrêts restent applicables. Les anciennes versions de l’EA ne fournissent pas les codes permettant d’isoler les refus. Installer/recompiler **1.03 sur chaque suiveur**, en conservant ses identifiants. Cette version conserve également les fonctions de télémétrie de 1.02.
+
+Le correctif ne rejoue pas automatiquement les copies bloquées ni celles ignorées pendant une pause. Pour une copie bloquée : mettre le suiveur en pause, attendre l’acquittement, vérifier les positions effectives et le motif, corriger les réglages si souhaité, puis utiliser **Réessayer après vérification** et réactiver le suiveur. Les changements de correspondance de symboles et de multiplicateur restent réservés aux nouvelles copies. Ne pas recréer le terminal ou effacer ses journaux pour contourner une incertitude.
+
 ### Exécution des copies
 
 - Ouvertures, changements de volume, fermetures partielles/totales et niveaux SL/TP sont synchronisés. Le volume cible est proportionnel au master, plafonné par compte, puis arrondi au pas inférieur autorisé par le broker. Un volume sous le minimum est refusé, pas augmenté automatiquement.

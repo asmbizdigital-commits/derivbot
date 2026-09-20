@@ -6,7 +6,7 @@ export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volum
 export type Settings = { multiplier: number; maxLot: number; maxTotalLots: number; lossLimitPct: number; reverse: boolean; symbols: Record<string, string> };
 export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; maxTotalLots: number; lossFloor: number };
 export type Agent = { id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
-type Binding = { slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
+type Binding = { slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
 export type CopyState = { version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
 export const freshCopyState = (): CopyState => ({ version: 1, enabled: false, agents: [], bindings: [], baseline: null, logs: [] });
 const defaults: Settings = { multiplier: 1, maxLot: 1, maxTotalLots: 5, lossLimitPct: 10, reverse: false, symbols: {} };
@@ -107,7 +107,7 @@ export class CopyEngine {
     }
     if (input.action==="retry") {
       if (a.pending || a.enabled) throw new Error("Pause et acquittement de la commande requis avant réessai");
-      this.state.bindings.filter(b=>b.slave===a.id&&!b.closed).forEach(b=>b.blocked=false);
+      this.state.bindings.filter(b=>b.slave===a.id&&!b.closed).forEach(b=>{b.blocked=false;b.lastError=undefined;});
       this.log(a.id,"Réessai demandé après vérification du terminal");return {};
     }
     if (input.action==="remove") {
@@ -162,10 +162,16 @@ export class CopyEngine {
     if(input.ack){
       const ack=input.ack as Record<string,unknown>;
       if(ack.id!==a.lastAck){
-        if(!a.pending||ack.id!==a.pending.id||!["done","failed","uncertain"].includes(String(ack.status)))throw new Error("Acquittement inconnu");
+        if(!a.pending||ack.id!==a.pending.id||!["done","failed","uncertain","skipped"].includes(String(ack.status)))throw new Error("Acquittement inconnu");
         const b=this.state.bindings.find(b=>b.magic===a.pending!.magic&&b.slave===a.id)!;
         const actual=positions.filter(p=>p.magic===b.magic);
-        if(ack.status!=="done") { b.blocked=true;a.enabled=false;a.error=str(ack.message??"Commande refusée","Message",250); }
+        if(ack.status==="skipped") {
+          // Only a confirmed, local preflight refusal of a never-opened copy is isolated.
+          // Unknown execution results, reductions and risk stops still pause the follower.
+          if(!["symbol_unavailable","symbol_specs_unavailable","volume_below_minimum"].includes(String(ack.code))||a.pending.fromVolume!==0||a.pending.volume<=0||actual.length||b.opened)throw new Error("Refus local incompatible avec la commande");
+          b.blocked=true;b.lastError=str(ack.message,"Motif du refus",250);
+        }
+        else if(ack.status!=="done") { b.blocked=true;a.enabled=false;b.lastError=str(ack.message??"Commande refusée","Message",250);a.error=`${b.symbol} : ${b.lastError}`; }
         else {
           if(actual.some(p=>p.symbol!==b.symbol||p.side!==b.side) || (a.pending.volume===0 && actual.length)) throw new Error("Acquittement incompatible avec les positions");
           b.appliedVolume=a.pending.volume;b.appliedSl=a.pending.sl;b.appliedTp=a.pending.tp;b.observedSl=actual[0]?.sl;b.observedTp=actual[0]?.tp;b.opened=true;
@@ -191,7 +197,7 @@ export class CopyEngine {
       if(b.opened && volume===0 && b.volume>0){b.closed=true;this.log(a.id,`Copie fermée sur le terminal : ${b.symbol}, aucune réouverture`);continue;}
       if(b.volume===0 && volume===0){b.closed=true;continue;}
       const target=canIncrease?b.volume:Math.min(volume,b.volume);
-      if(target>volume+1e-8 && positions.reduce((n,p)=>n+p.volume,0)+target-volume>a.settings.maxTotalLots+1e-8){b.blocked=true;this.log(a.id,`Limite totale de lots : ${b.symbol}`);continue;}
+      if(target>volume+1e-8 && positions.reduce((n,p)=>n+p.volume,0)+target-volume>a.settings.maxTotalLots+1e-8){b.blocked=true;b.lastError=`Limite totale de ${a.settings.maxTotalLots} lot(s) atteinte`;this.log(a.id,`${b.lastError} : ${b.symbol}`);continue;}
       if((Math.abs(target-volume)<1e-8 || b.appliedVolume===target) && actual.every(p=>(Math.abs(p.sl-b.sl)<1e-8&&Math.abs(p.tp-b.tp)<1e-8)||(b.appliedSl===b.sl&&b.appliedTp===b.tp&&p.sl===b.observedSl&&p.tp===b.observedTp)))continue;
       // An externally closed copy is not reopened without a new master event.
       if(target===0&&volume===0)continue;
@@ -212,6 +218,8 @@ export class CopyEngine {
         metrics:a.metrics??null,hasTraded:!!a.hasTraded||a.positions.length>0||this.state.bindings.some(b=>b.slave===a.id&&b.opened),
         positions:a.positions.map(p=>({...p,copied:a.role==="slave"&&this.state.bindings.some(b=>b.slave===a.id&&b.magic===p.magic)})),
         managedCopies:this.state.bindings.filter(b=>b.slave===a.id&&!b.closed).length,
+        queuedCopies:this.state.bindings.filter(b=>b.slave===a.id&&!b.closed&&!b.blocked&&!b.opened).length,
+        copyIssues:this.state.bindings.filter(b=>b.slave===a.id&&!b.closed&&b.blocked).map(b=>({source:b.source,symbol:b.symbol,message:b.lastError??"Copie bloquée : consulter le journal et vérifier le terminal"})),
       })),
       logs:this.state.logs.slice(0,200),
     };

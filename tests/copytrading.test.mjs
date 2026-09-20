@@ -146,6 +146,52 @@ test('offline master prevents opening; stale pending and failed acknowledgements
  assert.throws(()=>h.e.admin({action:'remove',id:s.id}),/réconciliez/);
  h.e.admin({action:'retry',id:s.id});h.hb(h.master,[pos()]);h.e.admin({action:'enable',id:s.id,enabled:true});assert.ok(h.hb(s).command);
 });
+test('twelve master positions on two symbols are copied without a four-position ceiling',()=>{
+ const h=harness(),s=h.slaves[0];h.e.admin({action:'enable',id:s.id,enabled:false});
+ h.e.admin({action:'settings',id:s.id,settings:{maxLot:.01,maxTotalLots:1}});h.e.admin({action:'enable',id:s.id,enabled:true});
+ const sources=Array.from({length:12},(_,i)=>pos(String(100+i),.1,{symbol:i%2?'Second index':'Volatility 75 Index'}));
+ h.hb(h.master,sources);let c=h.hb(s).command;const actual=[];
+ for(let i=0;i<12;i++){
+  assert.ok(c);assert.equal(c.volume,.01);actual.push(copied(c,c.volume,{id:String(9000+i)}));
+  c=h.ack(s,c,actual).command;
+ }
+ assert.equal(c,null);assert.equal(s.a.enabled,true);assert.equal(actual.length,12);assert.equal(new Set(actual.map(p=>p.symbol)).size,2);
+ assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).queuedCopies,0);
+});
+test('an initial below-minimum refusal blocks only that copy and continues the other symbol',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',.01,{symbol:'Index with higher minimum'}),pos('102',.01,{symbol:'Volatility 75 Index'})]);
+ const refused=h.hb(s).command;
+ const ack={id:refused.id,status:'skipped',code:'volume_below_minimum',message:'Demandé 0.01, minimum 0.1, pas 0.1'};
+ const next=h.hb(s,[],{ack}).command;
+ assert.equal(s.a.enabled,true);assert.equal(next.symbol,'Volatility 75 Index');assert.equal(next.volume,.01);
+ const snap=h.e.snapshot().agents.find(a=>a.id===s.id);
+ assert.equal(snap.copyIssues.length,1);assert.match(snap.copyIssues[0].message,/minimum 0.1/);assert.equal(snap.queuedCopies,1);
+ assert.equal(h.hb(s,[],{ack}).command.id,next.id,'lost acknowledgement does not duplicate or discard the next order');
+ assert.equal(h.ack(s,next,[copied(next)]).command,null);
+ h.hb(h.master,[pos('101',.01,{symbol:'Index with higher minimum'}),pos('102',.01,{symbol:'Volatility 75 Index'}),pos('103',.01,{symbol:'Volatility 75 Index'})]);
+ assert.equal(h.hb(s).command.symbol,'Volatility 75 Index');
+});
+test('isolated refusals require an allowed preflight reason and no existing exposure',()=>{
+ for(const code of ['symbol_unavailable','symbol_specs_unavailable']){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+  h.hb(s,[],{ack:{id:c.id,status:'skipped',code,message:'Instrument indisponible'}});assert.equal(s.a.enabled,true);
+ }
+ for(const code of ['loss_limit','margin','timeout','unknown',undefined]){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+  assert.throws(()=>h.hb(s,[],{ack:{id:c.id,status:'skipped',code,message:'Refus'}}),/Refus local/);
+ }
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);let c=h.hb(s).command;
+ assert.throws(()=>h.hb(s,[copied(c)],{ack:{id:c.id,status:'skipped',code:'volume_below_minimum',message:'Refus'}}),/Refus local/);
+ h.ack(s,c,[copied(c)]);h.hb(h.master,[pos('101',.2)]);c=h.hb(s).command;
+ assert.throws(()=>h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'volume_below_minimum',message:'Refus'}}),/Refus local/);
+});
+test('broker failures and uncertain outcomes still pause the whole follower',()=>{
+ for(const status of ['failed','uncertain']){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101'),pos('102')]);const c=h.hb(s).command;
+  assert.equal(h.ack(s,c,[],status).command,null);assert.equal(s.a.enabled,false);
+  assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).copyIssues.length,1);
+ }
+});
 test('reverse, symbol mapping and multiplier apply per follower and do not alter unrelated positions',()=>{
  const h=harness(),s=h.slaves[0];h.e.admin({action:'enable',id:s.id,enabled:false});h.e.admin({action:'settings',id:s.id,settings:{multiplier:2,maxLot:.7,reverse:true,symbols:{EURUSD:'EURUSD.a'}}});h.e.admin({action:'enable',id:s.id,enabled:true});
  h.hb(h.master,[pos()]);const c=h.hb(s,[pos('300',.1,{magic:888})]).command;

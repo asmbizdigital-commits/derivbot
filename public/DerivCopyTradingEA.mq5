@@ -1,5 +1,5 @@
 #property strict
-#property version "1.02"
+#property version "1.03"
 #property description "One MT5 master / up to 50 hedging followers. No credentials for the trading account leave MT5."
 #include <Trade/Trade.mqh>
 enum CopyRole { MASTER=0, SLAVE=1 };
@@ -14,7 +14,7 @@ input double TerminalMaxTotalLots=5.0;
 input double TerminalLossLimitPercent=10.0;
 input int DeviationPoints=20;
 CTrade copier;
-string sessionId="", ackId="", ackStatus="", ackMessage="";
+string sessionId="", ackId="", ackStatus="", ackMessage="", ackCode="";
 long sequence=0;
 double startingEquity=0;
 int lockHandle=INVALID_HANDLE;
@@ -29,7 +29,7 @@ string CredentialInput(string value,string name){
  return value;
 }
 int InvalidParameter(string message){
- Print("CopyTrading 1.02 : ",message);
+ Print("CopyTrading 1.03 : ",message);
  Alert("CopyTrading : ",message,"\nCorrigez les données d’entrée puis rattachez l’EA.");
  return INIT_PARAMETERS_INCORRECT;
 }
@@ -99,7 +99,7 @@ bool Journal(string id,string value){
  int f=FileOpen(Prefix()+id+".result",FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);if(f==INVALID_HANDLE)return false;
  bool ok=FileWriteString(f,value)>0;FileFlush(f);FileClose(f);return ok;
 }
-void Ack(string id,string status,string message){ackId=id;ackStatus=status;ackMessage=StringSubstr(message,0,240);Print("Copy ",id," ",status," ",ackMessage);}
+void Ack(string id,string status,string message,string code=""){ackId=id;ackStatus=status;ackCode=code;ackMessage=StringSubstr(message,0,240);Print("Copy ",id," ",status," ",ackMessage);}
 void Complete(string id,string status,string message){if(!Journal(id,status+"|"+message)){Ack(id,"uncertain","Journal local indisponible après exécution : contrôler le terminal");return;}Ack(id,status,message);}
 bool TradeOk(bool sent){uint code=copier.ResultRetcode();return sent&&(code==TRADE_RETCODE_DONE||code==TRADE_RETCODE_DONE_PARTIAL||code==TRADE_RETCODE_NO_CHANGES);}
 double TotalLots(){double sum=0;for(int i=0;i<PositionsTotal();i++)if(PositionGetTicket(i)>0)sum+=PositionGetDouble(POSITION_VOLUME);return sum;}
@@ -116,6 +116,12 @@ bool StopsMatch(ulong magic,double sl,double tp,double point){
   if(MathAbs(PositionGetDouble(POSITION_SL)-sl)>point/2||MathAbs(PositionGetDouble(POSITION_TP)-tp)>point/2)return false;
  return true;
 }
+void RejectPreflight(string id,string saved,string json,ulong magic,string symbol,string side,string code,string message){
+ bool consistent=false;double current=OwnedVolume(magic,symbol,side,consistent);
+ // No trade was sent, no prior execution claim exists, and no position has this magic.
+ if(saved==""&&Num(json,"fromVolume")==0&&Num(json,"volume")>0&&current==0&&consistent)Ack(id,"skipped",message,code);
+ else Ack(id,"uncertain",message+" ; copie existante ou résultat précédent à vérifier");
+}
 void Execute(string json){
  if(Role!=SLAVE)return;
  string id=Str(json,"id");if(!SafeId(id))return;
@@ -126,13 +132,14 @@ void Execute(string json){
  if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){Ack(id,"failed","Compte hedging requis");return;}
  string symbol=Str(json,"symbol"), side=Str(json,"side");
  double raw=Num(json,"volume"),sl=Num(json,"sl"),tp=Num(json,"tp"),magicValue=Num(json,"magic");
- if(raw<0||sl<0||tp<0||magicValue<=0||(side!="BUY"&&side!="SELL")||!SymbolSelect(symbol,true)){Ack(id,"failed","Commande ou symbole invalide");return;}
+ if(raw<0||sl<0||tp<0||magicValue<=0||symbol==""||(side!="BUY"&&side!="SELL")){Ack(id,"failed","Commande invalide");return;}
  ulong magic=(ulong)magicValue;
+ if(!SymbolSelect(symbol,true)){RejectPreflight(id,saved,json,magic,symbol,side,"symbol_unavailable",symbol+" : symbole indisponible sur ce compte ; vérifier son nom exact et le mapping");return;}
  double step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP),minimum=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN),maximum=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX),point=SymbolInfoDouble(symbol,SYMBOL_POINT);
- if(step<=0||minimum<=0||point<=0){Ack(id,"failed","Spécifications symbole indisponibles");return;}
+ if(step<=0||minimum<=0||point<=0){RejectPreflight(id,saved,json,magic,symbol,side,"symbol_specs_unavailable",symbol+" : spécifications de volume ou de prix indisponibles");return;}
  double target=NormalizeDouble(MathFloor((raw+1e-9)/step)*step,8);
  int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);sl=NormalizeDouble(sl,digits);tp=NormalizeDouble(tp,digits);
- if(raw>0&&target<minimum){Ack(id,"failed","Volume inférieur au minimum broker après arrondi");return;}
+ if(raw>0&&target<minimum){RejectPreflight(id,saved,json,magic,symbol,side,"volume_below_minimum",symbol+" : demandé "+DoubleToString(raw,8)+", arrondi "+DoubleToString(target,8)+", minimum "+DoubleToString(minimum,8)+", pas "+DoubleToString(step,8)+" lot(s). Ajuster les limites pour ce symbole si souhaité.");return;}
  bool consistent=false;double current=OwnedVolume(magic,symbol,side,consistent);
  if(!consistent){Ack(id,"uncertain","Magic partagé avec une position différente");return;}
  if(saved=="pending"){
@@ -196,13 +203,13 @@ void Sync(){
  double floatingPnl=0;string positions=Positions(floatingPnl);if(positions==""){busy=false;return;}sequence++;
  string payload="{\"role\":\""+(Role==MASTER?"master":"slave")+"\",\"account\":\""+Account()+"\",\"server\":\""+Esc(AccountInfoString(ACCOUNT_SERVER))+"\",\"mode\":\""+Mode()+"\",\"hedging\":"+(AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING?"true":"false")+",\"session\":\""+sessionId+"\",\"seq\":"+IntegerToString(sequence)+",\"equity\":"+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+",\"positions\":"+positions;
  payload+=",\"metrics\":"+Metrics(floatingPnl);
- if(ackId!="")payload+=",\"ack\":{\"id\":\""+ackId+"\",\"status\":\""+ackStatus+"\",\"message\":\""+Esc(ackMessage)+"\"}";
+ if(ackId!="")payload+=",\"ack\":{\"id\":\""+ackId+"\",\"status\":\""+ackStatus+"\",\"message\":\""+Esc(ackMessage)+"\",\"code\":\""+Esc(ackCode)+"\"}";
  payload+="}";
  char body[],response[];string headers;
  StringToCharArray(payload,body,0,WHOLE_ARRAY,CP_UTF8);ArrayResize(body,ArraySize(body)-1);
  int code=WebRequest("POST",effectiveApiUrl+"/api/copytrading/agent","Content-Type: application/json\r\nX-Copy-Agent-Id: "+effectiveAgentId+"\r\nX-Copy-Agent-Key: "+effectiveAgentKey+"\r\n",5000,body,response,headers);
  string json=CharArrayToString(response,0,-1,CP_UTF8);
- if(code==200){ackId="";ackStatus="";ackMessage="";if(StringFind(json,"\"command\":{")>=0)Execute(json);Comment("CopyTrading ",Role==MASTER?"MASTER":"SLAVE"," connecté\n",Account()," / ",AccountInfoString(ACCOUNT_SERVER));}
+ if(code==200){ackId="";ackStatus="";ackMessage="";ackCode="";if(StringFind(json,"\"command\":{")>=0)Execute(json);Comment("CopyTrading ",Role==MASTER?"MASTER":"SLAVE"," connecté\n",Account()," / ",AccountInfoString(ACCOUNT_SERVER));}
  else {Print("Copy API HTTP=",code," ",StringSubstr(json,0,300));Comment("CopyTrading : connexion refusée / indisponible. HTTP ",code);}
  busy=false;
 }
@@ -229,7 +236,7 @@ int OnInit(){
  startingEquity=AccountInfoDouble(ACCOUNT_EQUITY);
  sessionId=IntegerToString((long)TimeLocal())+"-"+IntegerToString((long)GetMicrosecondCount())+"-"+IntegerToString(ChartID());
  if(!EventSetTimer(PollSeconds)){Print("CopyTrading : impossible de démarrer le minuteur. Erreur ",GetLastError());FileClose(lockHandle);lockHandle=INVALID_HANDLE;return INIT_FAILED;}
- Print("CopyTrading 1.02 : paramètres validés, connexion au serveur au prochain cycle.");
+ Print("CopyTrading 1.03 : paramètres validés, connexion au serveur au prochain cycle.");
  return INIT_SUCCEEDED;
 }
 void OnTimer(){Sync();}
