@@ -179,9 +179,9 @@ export class CopyEngine {
       return {command:a.pending.copyProtocol===2&&(a.copyProtocol!==2||a.broker!==a.pending.broker)?null:a.pending};
     }
     const master=this.state.agents.find(x=>x.role==="master");
+    // Brokers/servers may differ from the master. Commands target the follower’s own identity.
     const compatibilityError=!master?"Master absent":
-      a.copyProtocol!==2||master.copyProtocol!==2||!a.broker||!master.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":
-      a.server!==master.server||a.broker!==master.broker?"Copie identique : le broker et le serveur doivent correspondre au master":"";
+      a.copyProtocol!==2||master.copyProtocol!==2||!a.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":"";
     const canIncrease=this.state.enabled&&a.enabled&&!!master&&this.online(master)&&!compatibilityError;
     if(canIncrease&&master){
       // Migrate persisted caps/multipliers. Old commands must be acknowledged first.
@@ -218,7 +218,7 @@ export class CopyEngine {
   }
   snapshot() {
     const master=this.state.agents.find(a=>a.role==="master");
-    const compatibility=(a:Agent)=>a.role!=="slave"?"":a.copyProtocol!==2||master?.copyProtocol!==2||!a.broker||!master?.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":a.server!==master.server||a.broker!==master.broker?"Copie identique : le broker et le serveur doivent correspondre au master":"";
+    const compatibility=(a:Agent)=>a.role!=="slave"?"":a.copyProtocol!==2||master?.copyProtocol!==2||!a.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":"";
     return {
       enabled:this.state.enabled,limit:50,
       agents:this.state.agents.map(a=>({

@@ -18,7 +18,7 @@ function harness(n=1,existing=[]){
  let now=1000000,seq=new Map();const e=new CopyEngine(undefined,()=>now);
  function register(role,i=0,settings={}){const auth=e.register({role,label:role+i,account:String(i+1),server:'Demo Server',mode:'demo',settings});return {...auth,a:e.state.agents.find(a=>a.id===auth.id)};}
  const master=register('master');const slaves=Array.from({length:n},(_,i)=>register('slave',i+1));
- function hb(who,positions=who.a.positions,extra={}){const next=(seq.get(who.id)??0)+1;seq.set(who.id,next);return e.heartbeat(e.authenticate(who.id,who.token),{role:who.a.role,account:who.a.account,server:who.a.server,mode:'demo',session:'terminal',seq:next,hedging:true,broker:'Test Broker',copyProtocol:2,equity:1000,positions,...extra});}
+ function hb(who,positions=who.a.positions,extra={}){const next=(seq.get(who.id)??0)+1;seq.set(who.id,next);return e.heartbeat(e.authenticate(who.id,who.token),{role:who.a.role,account:who.a.account,server:who.a.server,mode:who.a.mode,session:'terminal',seq:next,hedging:true,broker:'Test Broker',copyProtocol:2,equity:1000,positions,...extra});}
  hb(master,existing);for(const s of slaves){hb(s,[]);e.admin({action:'enable',id:s.id,enabled:true});}e.admin({action:'switch',enabled:true});
  return {e,master,slaves,hb,register,tick:ms=>{now+=ms;},ack(s,c,positions,status='done'){return hb(s,positions,{ack:{id:c.id,status,message:'broker result'}});}};
 }
@@ -278,15 +278,32 @@ test('admin registration accepts Render HTTPS origin behind HTTP and rejects for
  }finally{for(const k of names){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k];}}
 });
 
-test('same broker AND same server are required, and a legacy EA cannot receive exact commands',()=>{
- for(const extra of [{broker:'Other Broker'},{server:'Other Server'},{copyProtocol:undefined,broker:undefined}]){
-  const h=harness(),s=h.slaves[0];
-  if(extra.server)s.a.server=extra.server;
-  h.hb(h.master,[pos()]);assert.equal(h.hb(s,[],extra).command,null);
-  assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/broker|EA 1.04/);
+test('different brokers, servers and demo/real modes accept exact copies through the full lifecycle',()=>{
+ for(const [broker,server,mode] of [
+  ['Other Broker','Demo Server','demo'],
+  ['Test Broker','Other Server','demo'],
+  ['Other Broker','Other Server','demo'],
+  ['Other Broker','Live Server','real'],
+ ]){
+  const h=harness(),s=h.slaves[0];s.a.server=server;s.a.mode=mode;
+  const hb=(positions=s.a.positions,extra={})=>h.hb(s,positions,{broker,...extra});
+  const ack=(c,positions)=>hb(positions,{ack:{id:c.id,status:'done',message:'broker result'}});
+  h.hb(h.master,[pos('101',15)]);let c=hb().command;
+  assert.ok(c);assert.equal(c.volume,15);assert.equal(c.symbol,'EURUSD');assert.equal(c.side,'BUY');
+  assert.equal(c.account,s.a.account);assert.equal(c.server,server);assert.equal(c.broker,broker);assert.equal(c.mode,mode);
+  assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).error,'');
+  assert.equal(hb().command.id,c.id);assert.equal(ack(c,[copied(c)]).command,null);
+  h.hb(h.master,[pos('101',20,{sl:1.06,tp:1.3})]);c=hb().command;
+  assert.equal(c.volume,20);assert.equal(c.sl,1.06);assert.equal(c.tp,1.3);ack(c,[copied(c)]);
+  h.hb(h.master,[pos('101',5)]);c=hb().command;assert.equal(c.volume,5);ack(c,[copied(c)]);
+  h.hb(h.master,[]);c=hb().command;assert.equal(c.volume,0);assert.equal(ack(c,[]).command,null);
  }
- const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()],{copyProtocol:undefined,broker:undefined});
- assert.equal(h.hb(s).command,null);
+});
+test('legacy EAs still require the exact-copy protocol regardless of broker or server',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);
+ assert.equal(h.hb(s,[],{copyProtocol:undefined,broker:undefined}).command,null);
+ assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/EA 1.04/);
+ h.hb(h.master,[pos()],{copyProtocol:undefined,broker:undefined});assert.equal(h.hb(s).command,null);
  h.hb(h.master,[pos()]);assert.equal(h.hb(s).command.volume,.5);
 });
 test('positions missed offline or while paused are copied on reconnection or activation',()=>{

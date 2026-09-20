@@ -51,7 +51,7 @@ Le passage de `file` à `mysql` **ne migre pas automatiquement** les anciens com
 2. Cliquer sur **Ajouter un terminal** pour ouvrir la fenêtre d’enregistrement. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel. Une erreur laisse les champs saisis disponibles pour correction.
 3. Conserver `AgentId` et `AgentKey`, affichés une seule fois. Utiliser **Copier AgentId** pour le champ MT5 `AgentId` (36 caractères), puis **Copier AgentKey** pour `AgentKey` (64 caractères). Chaque bouton copie uniquement sa valeur. Ne pas les partager avec d’autres terminaux.
 4. Enregistrer chaque suiveur de la même manière, jusqu’à 50. Un compte déjà enregistré ne peut pas être inscrit une seconde fois avec le même serveur.
-5. La copie est **identique 1:1**, sans réglage personnalisé. Le broker (`ACCOUNT_COMPANY`) et le serveur (`ACCOUNT_SERVER`) doivent être identiques au master. Les comptes suiveurs doivent être **hedging** pour conserver séparément les positions ; le master peut être hedging ou netting.
+5. La copie est **identique 1:1**, sans réglage personnalisé. Tous les brokers et serveurs sont acceptés : ils peuvent différer entre le master et les suiveurs, y compris entre comptes démo et réels. Les comptes suiveurs doivent être **hedging** pour conserver séparément les positions ; le master peut être hedging ou netting.
 
 Un terminal MT5 connecté est nécessaire par compte. Plusieurs installations MT5 distinctes peuvent tourner sur un VPS adapté. La capacité administrative de 50 comptes est testée côté serveur ; elle ne constitue pas une mesure de performance avec 50 terminaux réels.
 
@@ -124,11 +124,19 @@ Références : [propriétés des transactions MQL5](https://www.mql5.com/en/docs
 ### Copie identique — EA 1.04
 
 - Chaque position du master conserve son **symbole exact, BUY/SELL, volume et SL/TP**. Aucun multiplicateur, plafond personnalisé, inversion ou mapping n’est appliqué, même si l’ancien stockage contient encore ces paramètres.
-- Le serveur vérifie le broker et le serveur transmis par les EA authentifiés. L’EA vérifie également le broker, le compte et le serveur avant l’exécution. Installer **1.04 sur le master et chaque suiveur** : les versions précédentes ne déclarent pas ce protocole et conservent leurs propres plafonds.
+- Le broker et le serveur du suiveur ne sont pas comparés à ceux du master. Chaque commande reste adressée au compte, au serveur et au broker propres au suiveur ; l’EA vérifie cette identité de destination avant l’exécution. Installer **1.04 sur le master et chaque suiveur** : les versions précédentes ne déclarent pas ce protocole et conservent leurs propres plafonds.
 - Toutes les positions exécutées encore ouvertes sont reprises au démarrage ou à la reconnexion. Les ouvertures, augmentations, réductions, clôtures et modifications SL/TP sont synchronisées. Les positions manuelles indépendantes des suiveurs restent intactes.
 - Les ordres en attente ne sont copiés qu’après leur exécution sur le master. La synchronisation est périodique : une position ouverte puis fermée entre deux snapshots peut être manquée. Le prix d’exécution dépend du marché au moment où le suiveur exécute l’ordre.
 - Le moteur n’impose plus le plafond de 300 positions par snapshot ni celui de 15 000 associations. Les transmissions restent soumises à la taille maximale des requêtes de l’API ; un snapshot trop volumineux est refusé intégralement, jamais tronqué.
 - Si une copie se ferme localement par intervention manuelle ou SL/TP, elle n’est pas réouverte automatiquement. La pause continue d’empêcher les nouvelles expositions tout en suivant les réductions et clôtures.
+
+### Copie entre brokers et serveurs différents
+
+Le retrait de la restriction master/suiveur est une mise à jour du serveur et de l’interface. Les EA **1.04 déjà installés restent compatibles**, sans recompilation : le champ broker d’une commande désigne celui du suiveur, jamais celui du master. Le login, le serveur et le mode enregistrés doivent toujours correspondre au terminal qui se connecte.
+
+Après déploiement, le message imposant un broker et un serveur identiques disparaît. Activer le suiveur souhaité pour reprendre les positions ouvertes du master. Les symboles, lots et SL/TP sont transmis tels quels ; un instrument absent ou un volume non accepté chez le broker destinataire reste signalé avec son motif précis.
+
+Validation du correctif inter-brokers/serveurs : **45 tests ciblés réussis**, dont un cycle complet ouverture, modification SL/TP, augmentation, réduction et clôture avec brokers, serveurs et modes démo/réel différents. Le test MySQL réel reste ignoré faute de serveur de test configuré. Compilation web et lint ciblé réussis.
 
 ### Migration des anciennes copies
 
@@ -154,7 +162,7 @@ Après un refus ou une incertitude, vérifier les positions et l’historique da
 
 ## 7. Validation avant utilisation
 
-Le dépôt contient des tests du moteur : 50 files distinctes, authentification, anti-répétition, cycle ouverture/fermeture, volumes exacts, compatibilité broker/serveur, migration, panne de stockage et redémarrage. Ils simulent les terminaux ; ils ne remplacent pas la compilation MQL5 et une recette avec le broker.
+Le dépôt contient des tests du moteur : 50 files distinctes, authentification, anti-répétition, cycle ouverture/fermeture, volumes exacts, copie entre brokers/serveurs différents, migration, panne de stockage et redémarrage. Ils simulent les terminaux ; ils ne remplacent pas la compilation MQL5 et une recette avec le broker.
 
 Validation de la version **1.04** : **44 tests ciblés réussis**, dont la copie exacte, la reprise, la migration des anciens paramètres, les refus broker isolés et l’anti-duplication. Le test d’intégration MySQL réel est ignoré faute de serveur de test configuré. Compilation MetaEditor : **0 erreur, 0 avertissement**. Compilation web de production réussie avec `vinext build` ; le wrapper `npm run build` nécessite GNU `timeout`, absent de cette machine. Lint des modules modifiés sans erreur. Le contrôle TypeScript global conserve trois erreurs préexistantes de types Cloudflare (`db/index.ts`, `worker/index.ts`). Aucun ordre n’a été envoyé au broker pendant ces vérifications ; le serveur et les terminaux actifs ne sont pas mis à jour par la compilation locale.
 
