@@ -4,12 +4,13 @@ export type PositionDetails = { openPrice:number; currentPrice:number; profit:nu
 export type AccountMetrics = { balance:number; currency:string; floatingPnl:number; realizedDay:number|null; dealsDay:number|null; day:string; receivedAt:number };
 export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; magic: number; details?:PositionDetails };
 export type Settings = { multiplier: number; maxLot: number; maxTotalLots: number; lossLimitPct: number; reverse: boolean; symbols: Record<string, string> };
-export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; maxTotalLots: number; lossFloor: number };
-export type Agent = { id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
-type Binding = { slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
+export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; copyProtocol: 2; broker: string };
+export type Agent = { broker?: string; copyProtocol?: number; id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
+type Binding = { exact?: boolean; retired?: boolean; slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
 export type CopyState = { version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
 export const freshCopyState = (): CopyState => ({ version: 1, enabled: false, agents: [], bindings: [], baseline: null, logs: [] });
-const defaults: Settings = { multiplier: 1, maxLot: 1, maxTotalLots: 5, lossLimitPct: 10, reverse: false, symbols: {} };
+// Zero caps are persisted only for backward-compatible state shape; execution has no custom limits.
+const defaults: Settings = { multiplier: 1, maxLot: 0, maxTotalLots: 0, lossLimitPct: 0, reverse: false, symbols: {} };
 const key = (p: Position) => `${p.id}:${p.side}`;
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
 export function secretEqual(a: string, b: string) { const aa = Buffer.from(hash(a)), bb = Buffer.from(hash(b)); return timingSafeEqual(aa, bb); }
@@ -30,15 +31,9 @@ function parseMetrics(input:unknown, receivedAt:number):AccountMetrics|null {
   if((realizedDay===null)!==(dealsDay===null))throw new Error("Historique MT5 incomplet");
   return {balance:number(p.balance,-1e15,1e15,"Balance"),currency,floatingPnl:number(p.floatingPnl,-1e15,1e15,"PnL flottant"),realizedDay,dealsDay,day,receivedAt};
 }
-export function parseSettings(input: unknown): Settings {
-  const d = { ...defaults, ...(input && typeof input === "object" ? input : {}) } as Settings;
-  if (typeof d.reverse !== "boolean" || !d.symbols || Array.isArray(d.symbols) || typeof d.symbols !== "object" || Object.keys(d.symbols).length > 100) throw new Error("Paramètres invalides");
-  const symbols: Record<string, string> = Object.create(null);
-  for (const [a,b] of Object.entries(d.symbols)) symbols[str(a,"Symbole",80)] = str(b,"Symbole cible",80);
-  return { multiplier: number(d.multiplier,.01,100,"Multiplicateur"), maxLot: number(d.maxLot,.001,1000,"Lot maximum"), maxTotalLots: number(d.maxTotalLots,.001,10000,"Total lots"), lossLimitPct: number(d.lossLimitPct,.1,100,"Perte session"), reverse:d.reverse,symbols };
-}
+export function parseSettings(): Settings { return { ...defaults, symbols: {} }; }
 export function parsePositions(input: unknown): Position[] {
-  if (!Array.isArray(input) || input.length > 300) throw new Error("Snapshot complet requis (300 positions maximum)");
+  if (!Array.isArray(input)) throw new Error("Snapshot complet requis");
   const ids = new Set<string>();
   return input.map((p) => {
     if (!p || typeof p !== "object") throw new Error("Position invalide");
@@ -53,7 +48,7 @@ export function parsePositions(input: unknown): Position[] {
       if(!d||typeof d!=="object"||Array.isArray(d))throw new Error("Détails position invalides");
       details={openPrice:number(d.openPrice,0,1e15,"Prix entrée"),currentPrice:number(d.currentPrice,0,1e15,"Prix actuel"),profit:number(d.profit,-1e15,1e15,"Profit position"),swap:number(d.swap,-1e15,1e15,"Swap")};
     }
-    return { id,symbol:str(p.symbol,"Symbole",80),side:p.side,volume:number(p.volume,.00000001,100000,"Volume"),sl:number(p.sl,0,1e15,"SL"),tp:number(p.tp,0,1e15,"TP"),magic,...(details?{details}:{}) };
+    return { id,symbol:str(p.symbol,"Symbole",80),side:p.side,volume:number(p.volume,.00000001,Number.MAX_SAFE_INTEGER,"Volume"),sl:number(p.sl,0,1e15,"SL"),tp:number(p.tp,0,1e15,"TP"),magic,...(details?{details}:{}) };
   });
 }
 
@@ -75,7 +70,7 @@ export class CopyEngine {
     const account=str(input.account,"Login MT5",30), server=str(input.server,"Serveur MT5");
     if (!/^\d+$/.test(account) || this.state.agents.some(a=>a.account===account&&a.server===server)) throw new Error("Compte invalide ou déjà enregistré");
     const token=randomBytes(32).toString("hex");
-    const agent:Agent={id:randomUUID(),label:str(input.label,"Nom",60),role:input.role,account,server,mode:input.mode,tokenHash:hash(token),enabled:false,settings:parseSettings(input.settings),lastSeen:0,session:"",seq:0,equity:0,sessionEquity:0,positions:[],pending:null,lastAck:"",error:""};
+    const agent:Agent={id:randomUUID(),label:str(input.label,"Nom",60),role:input.role,account,server,mode:input.mode,tokenHash:hash(token),enabled:false,settings:parseSettings(),lastSeen:0,session:"",seq:0,equity:0,sessionEquity:0,positions:[],pending:null,lastAck:"",error:""};
     this.state.agents.push(agent);this.log(agent.id,"Terminal enregistré, copie en pause");return {id:agent.id,token};
   }
   admin(input: Record<string, unknown>) {
@@ -87,7 +82,7 @@ export class CopyEngine {
         if (!master || !this.online(master) || this.state.baseline===null) throw new Error("Connectez le master avant le démarrage");
         if (this.state.enabled) return {};
         this.state.enabled=true;
-        if (input.copyExisting===true) for(const a of this.state.agents.filter(a=>a.role==="slave"&&a.enabled&&this.online(a))) for(const p of master.positions) this.bind(a,p);
+        for(const a of this.state.agents.filter(a=>a.role==="slave"&&a.enabled&&this.online(a))) for(const p of master.positions) this.bind(a,p);
       } else { this.state.enabled=false; for(const a of this.state.agents) if(a.pending?.expiresAt) a.pending.expiresAt=this.now()-1; }
       this.log("system",this.state.enabled?"Copie démarrée":"Pause des nouvelles expositions ; suivi des copies existantes conservé");return {};
     }
@@ -95,15 +90,15 @@ export class CopyEngine {
     if (!a) throw new Error("Terminal inconnu");
     if (input.action==="settings") {
       if (a.enabled || a.pending) throw new Error("Mettre le suiveur en pause et attendre la commande en cours");
-      a.settings=parseSettings(input.settings);this.log(a.id,"Paramètres mis à jour (nouvelles copies)");return {};
+      throw new Error("Copie identique 1:1 : aucun paramètre personnalisé par suiveur");
     }
     if (input.action==="enable") {
       if (a.role!=="slave" || typeof input.enabled!=="boolean") throw new Error("Suiveur requis");
-      if (input.enabled && (!this.online(a)||a.equity<=0||a.pending)) throw new Error("Suiveur hors ligne ou commande en attente");
+      if (input.enabled && (!this.online(a)||a.pending)) throw new Error("Suiveur hors ligne ou commande en attente");
       if (input.enabled && !a.enabled) { a.sessionEquity=a.equity;a.error=""; }
       a.enabled=input.enabled;
       if(!a.enabled && a.pending?.expiresAt)a.pending.expiresAt=this.now()-1;
-      this.log(a.id,a.enabled?"Suiveur activé, nouvelle référence de perte session":"Suiveur en pause");return {};
+      this.log(a.id,a.enabled?"Suiveur activé, copie identique 1:1":"Suiveur en pause");return {};
     }
     if (input.action==="retry") {
       if (a.pending || a.enabled) throw new Error("Pause et acquittement de la commande requis avant réessai");
@@ -119,31 +114,24 @@ export class CopyEngine {
     throw new Error("Action inconnue");
   }
   private bind(a:Agent,p:Position) {
-    if(this.state.bindings.some(b=>b.slave===a.id&&b.source===key(p)))return;
-    if(this.state.bindings.length>=15000){a.enabled=false;a.error="Capacité du journal de copies atteinte : nouvelles copies bloquées";this.log(a.id,a.error);return;}
-    const side=a.settings.reverse?(p.side==="BUY"?"SELL":"BUY"):p.side;
+    if(this.state.bindings.some(b=>b.slave===a.id&&b.source===key(p)&&!b.retired))return;
     // Independent magic per copy, within exact JS/MQL integer range.
     let magic:number; do{magic=randomBytes(6).readUIntBE(0,6);}while(magic===0||this.state.bindings.some(b=>b.magic===magic));
-    this.state.bindings.push({slave:a.id,source:key(p),magic,symbol:a.settings.symbols[p.symbol]??p.symbol,side,multiplier:a.settings.multiplier,volume:Math.min(p.volume*a.settings.multiplier,a.settings.maxLot),sl:a.settings.reverse?p.tp:p.sl,tp:a.settings.reverse?p.sl:p.tp,blocked:false,closed:false});
+    this.state.bindings.push({slave:a.id,source:key(p),magic,exact:true,symbol:p.symbol,side:p.side,multiplier:1,volume:p.volume,sl:p.sl,tp:p.tp,blocked:false,closed:false});
     this.log(a.id,`Copie détectée : ${p.side} ${p.symbol} #${p.id}`);
   }
-  private sourceUpdate(master:Agent, previous:Position[]|null) {
+  private sourceUpdate(master:Agent) {
     const current=new Map(master.positions.map(p=>[key(p),p]));
     for(const b of this.state.bindings.filter(b=>!b.closed)) {
       const p=current.get(b.source);const a=this.state.agents.find(a=>a.id===b.slave)!;
-      if(!p){b.volume=0;if(a.pending?.magic===b.magic&&a.pending.expiresAt)a.pending.expiresAt=this.now()-1;continue;}
-      const target=Math.min(p.volume*b.multiplier,a.settings.maxLot);
+      if(!p||b.retired){b.volume=0;if(a.pending?.magic===b.magic&&a.pending.expiresAt)a.pending.expiresAt=this.now()-1;continue;}
+      const target=p.volume;
       if(a.pending?.magic===b.magic&&a.pending.expiresAt&&target<a.pending.volume)a.pending.expiresAt=this.now()-1;
       b.volume=this.state.enabled&&a.enabled&&this.online(a)?target:Math.min(b.volume,target);
-      const reverse=b.side!==p.side;b.sl=reverse?p.tp:p.sl;b.tp=reverse?p.sl:p.tp;
+      if(b.exact){b.sl=p.sl;b.tp=p.tp;}
     }
-    if(previous && this.state.enabled){
-      const old=new Set(previous.map(key));
-      for(const p of master.positions.filter(p=>!old.has(key(p))))for(const a of this.state.agents.filter(a=>a.role==="slave")){
-        if(a.enabled&&this.online(a))this.bind(a,p);
-        else this.log(a.id,`Ouverture ignorée (pause/hors ligne) : ${p.symbol} #${p.id}`);
-      }
-    }
+    if(this.state.enabled)for(const a of this.state.agents.filter(a=>a.role==="slave"&&a.enabled&&this.online(a)))
+      for(const p of master.positions)this.bind(a,p);
     this.state.baseline=master.positions;
   }
   heartbeat(a:Agent,input:Record<string,unknown>) {
@@ -153,12 +141,14 @@ export class CopyEngine {
     const session=str(input.session,"Session",80), seq=number(input.seq,1,Number.MAX_SAFE_INTEGER,"Séquence");
     if(!Number.isInteger(seq))throw new Error("Séquence invalide");
     if(a.session&&a.session!==session&&this.online(a))throw new Error("Un autre EA est déjà connecté avec cette identité");
-    if(a.session===session&&seq<=a.seq)return {command:a.pending};
+    if(a.session===session&&seq<=a.seq)return {command:a.pending?.copyProtocol===2&&(input.copyProtocol!==2||input.broker!==a.pending.broker)?null:a.pending};
     const positions=parsePositions(input.positions), equity=number(input.equity,0,1e15,"Equity"), metrics=parseMetrics(input.metrics,this.now());
-    const previous=this.state.baseline;
+    const broker=input.broker===undefined?undefined:str(input.broker,"Broker MT5");
+    const copyProtocol=input.copyProtocol===2?2:undefined;
+    a.broker=broker;a.copyProtocol=copyProtocol;a.settings=parseSettings();
     a.session=session;a.seq=seq;a.lastSeen=this.now();a.equity=equity;a.positions=positions;a.metrics=metrics;
     a.hasTraded=!!a.hasTraded||positions.length>0||(metrics?.dealsDay??0)>0;
-    if(a.role==="master"){this.sourceUpdate(a,previous);return {command:null};}
+    if(a.role==="master"){this.sourceUpdate(a);return {command:null};}
     if(input.ack){
       const ack=input.ack as Record<string,unknown>;
       if(ack.id!==a.lastAck){
@@ -166,14 +156,17 @@ export class CopyEngine {
         const b=this.state.bindings.find(b=>b.magic===a.pending!.magic&&b.slave===a.id)!;
         const actual=positions.filter(p=>p.magic===b.magic);
         if(ack.status==="skipped") {
-          // Only a confirmed, local preflight refusal of a never-opened copy is isolated.
-          // Unknown execution results, reductions and risk stops still pause the follower.
-          if(!["symbol_unavailable","symbol_specs_unavailable","volume_below_minimum"].includes(String(ack.code))||a.pending.fromVolume!==0||a.pending.volume<=0||actual.length||b.opened)throw new Error("Refus local incompatible avec la commande");
+          // Isolate confirmed preflight/broker refusals of a never-opened copy.
+          // Unknown execution results and errors on existing copies still require reconciliation.
+          if(!["symbol_unavailable","symbol_specs_unavailable","volume_below_minimum","volume_incompatible","broker_rejected"].includes(String(ack.code))||a.pending.fromVolume!==0||a.pending.volume<=0||actual.length||b.opened)throw new Error("Refus local incompatible avec la commande");
           b.blocked=true;b.lastError=str(ack.message,"Motif du refus",250);
         }
         else if(ack.status!=="done") { b.blocked=true;a.enabled=false;b.lastError=str(ack.message??"Commande refusée","Message",250);a.error=`${b.symbol} : ${b.lastError}`; }
         else {
           if(actual.some(p=>p.symbol!==b.symbol||p.side!==b.side) || (a.pending.volume===0 && actual.length)) throw new Error("Acquittement incompatible avec les positions");
+          if(a.pending.copyProtocol===2 && (Math.abs(actual.reduce((n,p)=>n+p.volume,0)-a.pending.volume)>1e-8 || actual.some(p=>Math.abs(p.sl-a.pending!.sl)>1e-8||Math.abs(p.tp-a.pending!.tp)>1e-8))) {
+            b.blocked=true;b.lastError="Exécution différente des valeurs exactes du master";a.enabled=false;a.error=b.lastError;
+          }
           b.appliedVolume=a.pending.volume;b.appliedSl=a.pending.sl;b.appliedTp=a.pending.tp;b.observedSl=actual[0]?.sl;b.observedTp=actual[0]?.tp;b.opened=true;
           if(!actual.length)b.closed=true;
         }
@@ -183,37 +176,55 @@ export class CopyEngine {
     }
     if(a.pending){
       if(this.now()-a.pending.issuedAt>30000){a.enabled=false;a.error="Acquittement manquant : vérifier le terminal, aucun nouvel ordre";}
-      return {command:a.pending};
-    }
-    if(a.enabled && a.sessionEquity>0 && equity<=a.sessionEquity*(1-a.settings.lossLimitPct/100)){
-      a.enabled=false;a.error="Limite de perte session atteinte : nouvelles expositions bloquées";this.log(a.id,a.error);
+      return {command:a.pending.copyProtocol===2&&(a.copyProtocol!==2||a.broker!==a.pending.broker)?null:a.pending};
     }
     const master=this.state.agents.find(x=>x.role==="master");
-    const canIncrease=this.state.enabled&&a.enabled&&!!master&&this.online(master);
+    const compatibilityError=!master?"Master absent":
+      a.copyProtocol!==2||master.copyProtocol!==2||!a.broker||!master.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":
+      a.server!==master.server||a.broker!==master.broker?"Copie identique : le broker et le serveur doivent correspondre au master":"";
+    const canIncrease=this.state.enabled&&a.enabled&&!!master&&this.online(master)&&!compatibilityError;
+    if(canIncrease&&master){
+      // Migrate persisted caps/multipliers. Old commands must be acknowledged first.
+      for(const b of this.state.bindings.filter(b=>b.slave===a.id&&!b.closed&&!b.exact&&!b.retired)){
+        const p=master.positions.find(p=>key(p)===b.source);if(!p)continue;
+        if(b.symbol!==p.symbol||b.side!==p.side){
+          if(b.blocked)continue; // Uncertain execution still requires reconciliation.
+          b.retired=true;b.volume=0;
+        }else{
+          b.exact=true;b.multiplier=1;b.volume=p.volume;b.sl=p.sl;b.tp=p.tp;
+          if(b.lastError&&/Limite totale|Volume inférieur|volume.*minimum|Limite de lots|Limite de perte/i.test(b.lastError)){b.blocked=false;b.lastError=undefined;}
+        }
+      }
+      for(const p of master.positions)this.bind(a,p);
+      this.sourceUpdate(master);
+    }
+    // Old EAs can finish their outstanding command but cannot receive new-format commands.
+    if(a.copyProtocol!==2)return {command:null};
     for(const b of this.state.bindings.filter(b=>b.slave===a.id&&!b.closed&&!b.blocked).sort((a,b)=>a.volume-b.volume)){
       const actual=positions.filter(p=>p.magic===b.magic);
       const volume=actual.reduce((n,p)=>n+p.volume,0);
-      if(actual.some(p=>p.symbol!==b.symbol||p.side!==b.side)){b.blocked=true;a.enabled=false;a.error="Position copiée incohérente : vérifier le terminal";this.log(a.id,a.error);continue;}
+      if(actual.some(p=>p.symbol!==b.symbol||p.side!==b.side)){b.blocked=true;a.enabled=false;a.error="Position copiée incohérente : vérifier le terminal";b.lastError=a.error;this.log(a.id,a.error);break;}
       if(b.opened && volume===0 && b.volume>0){b.closed=true;this.log(a.id,`Copie fermée sur le terminal : ${b.symbol}, aucune réouverture`);continue;}
       if(b.volume===0 && volume===0){b.closed=true;continue;}
       const target=canIncrease?b.volume:Math.min(volume,b.volume);
-      if(target>volume+1e-8 && positions.reduce((n,p)=>n+p.volume,0)+target-volume>a.settings.maxTotalLots+1e-8){b.blocked=true;b.lastError=`Limite totale de ${a.settings.maxTotalLots} lot(s) atteinte`;this.log(a.id,`${b.lastError} : ${b.symbol}`);continue;}
-      if((Math.abs(target-volume)<1e-8 || b.appliedVolume===target) && actual.every(p=>(Math.abs(p.sl-b.sl)<1e-8&&Math.abs(p.tp-b.tp)<1e-8)||(b.appliedSl===b.sl&&b.appliedTp===b.tp&&p.sl===b.observedSl&&p.tp===b.observedTp)))continue;
+      if(Math.abs(target-volume)<1e-8 && actual.every(p=>Math.abs(p.sl-b.sl)<1e-8&&Math.abs(p.tp-b.tp)<1e-8))continue;
       // An externally closed copy is not reopened without a new master event.
       if(target===0&&volume===0)continue;
-      a.pending={fromVolume:volume,id:randomUUID(),magic:b.magic,symbol:b.symbol,side:b.side,volume:target,sl:b.sl,tp:b.tp,issuedAt:this.now(),expiresAt:target>volume?this.now()+15000:0,account:a.account,server:a.server,mode:a.mode,maxTotalLots:a.settings.maxTotalLots,lossFloor:a.sessionEquity*(1-a.settings.lossLimitPct/100)};
+      a.pending={fromVolume:volume,id:randomUUID(),magic:b.magic,symbol:b.symbol,side:b.side,volume:target,sl:b.sl,tp:b.tp,issuedAt:this.now(),expiresAt:target>volume?this.now()+15000:0,account:a.account,server:a.server,mode:a.mode,copyProtocol:2,broker:a.broker!};
       this.log(a.id,`Commande ${a.pending.id} · ${b.symbol} · volume cible ${target}`);
       return {command:a.pending};
     }
     return {command:null};
   }
   snapshot() {
+    const master=this.state.agents.find(a=>a.role==="master");
+    const compatibility=(a:Agent)=>a.role!=="slave"?"":a.copyProtocol!==2||master?.copyProtocol!==2||!a.broker||!master?.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":a.server!==master.server||a.broker!==master.broker?"Copie identique : le broker et le serveur doivent correspondre au master":"";
     return {
       enabled:this.state.enabled,limit:50,
       agents:this.state.agents.map(a=>({
         id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,
-        enabled:a.enabled,settings:a.settings,lastSeen:a.lastSeen,equity:a.equity,
-        sessionEquity:a.sessionEquity,pending:a.pending,error:a.error,
+        enabled:a.enabled,settings:parseSettings(),broker:a.broker??null,copyProtocol:a.copyProtocol??null,lastSeen:a.lastSeen,equity:a.equity,
+        sessionEquity:a.sessionEquity,pending:a.pending,error:a.error||compatibility(a),
         online:this.online(a),positionCount:a.positions.length,
         metrics:a.metrics??null,hasTraded:!!a.hasTraded||a.positions.length>0||this.state.bindings.some(b=>b.slave===a.id&&b.opened),
         positions:a.positions.map(p=>({...p,copied:a.role==="slave"&&this.state.bindings.some(b=>b.slave===a.id&&b.magic===p.magic)})),

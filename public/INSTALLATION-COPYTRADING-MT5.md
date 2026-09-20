@@ -48,10 +48,10 @@ Le passage de `file` à `mysql` **ne migre pas automatiquement** les anciens com
 ## 2. Enregistrer le master et les suiveurs
 
 1. Ouvrir **Copytrading** et saisir la clé administrateur. Elle reste en mémoire dans la page, sans stockage dans le navigateur.
-2. Cliquer sur **Ajouter un terminal** pour ouvrir la fenêtre d’enregistrement. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel. Les réglages d’un suiveur s’ouvrent également en fenêtre modale via **Paramètres**. Une erreur laisse les champs saisis disponibles pour correction.
+2. Cliquer sur **Ajouter un terminal** pour ouvrir la fenêtre d’enregistrement. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel. Une erreur laisse les champs saisis disponibles pour correction.
 3. Conserver `AgentId` et `AgentKey`, affichés une seule fois. Utiliser **Copier AgentId** pour le champ MT5 `AgentId` (36 caractères), puis **Copier AgentKey** pour `AgentKey` (64 caractères). Chaque bouton copie uniquement sa valeur. Ne pas les partager avec d’autres terminaux.
 4. Enregistrer chaque suiveur de la même manière, jusqu’à 50. Un compte déjà enregistré ne peut pas être inscrit une seconde fois avec le même serveur.
-5. Régler individuellement le multiplicateur de lots, le maximum par copie, le maximum total de lots et la perte maximale de session. Les comptes suiveurs doivent être **hedging**, pas netting. Le master peut être hedging ou netting.
+5. La copie est **identique 1:1**, sans réglage personnalisé. Le broker (`ACCOUNT_COMPANY`) et le serveur (`ACCOUNT_SERVER`) doivent être identiques au master. Les comptes suiveurs doivent être **hedging** pour conserver séparément les positions ; le master peut être hedging ou netting.
 
 Un terminal MT5 connecté est nécessaire par compte. Plusieurs installations MT5 distinctes peuvent tourner sur un VPS adapté. La capacité administrative de 50 comptes est testée côté serveur ; elle ne constitue pas une mesure de performance avec 50 terminaux réels.
 
@@ -72,23 +72,20 @@ La clé administrateur permet de contrôler toutes les copies. En cas de fuite d
 | `AgentId`, `AgentKey` | Identifiants générés pour ce terminal précis. Ne pas utiliser la clé administrateur ici. |
 | `PollSeconds` | 2 secondes par défaut. |
 | `AllowRealTrading` | `false` par défaut ; `true` nécessaire pour exécuter sur un suiveur réel. |
-| `TerminalMaxLot` | Maximum de lots par copie côté terminal, 1 par défaut. |
-| `TerminalMaxTotalLots` | Maximum total du compte, 5 par défaut. |
-| `TerminalLossLimitPercent` | Limite de perte par rapport à l’equity au démarrage de l’EA, 10 % par défaut. |
 | `DeviationPoints` | Déviation autorisée à l’exécution, en points MT5, 20 par défaut. |
 
-Les limites serveur **et** terminal s’appliquent : le réglage le plus restrictif prévaut. Une modification des limites côté interface ne supprime pas celles de l’EA. La limite de perte bloque les nouvelles expositions ; elle ne liquide pas toutes les positions et ne garantit pas un montant maximal de perte. Les positions et opérations manuelles du compte entrent dans le total des lots et l’equity.
+L’EA **1.04** ne possède aucun plafond personnalisé de lots ou de perte. Il transmet le volume et les niveaux SL/TP exacts, sans arrondi vers un volume inférieur. Le broker reste responsable de l’acceptation de l’ordre : marge disponible, spécifications et autorisations de trading. Un même broker/serveur ne garantit pas une marge identique sur les comptes.
 
 ### Si MT5 retire l’EA avec « incorrect parameters »
 
 La version **1.01** remplace le message général « Paramètres copytrading invalides » par une alerte indiquant précisément le champ refusé. Elle retire les espaces, tabulations et retours à la ligne aux extrémités des valeurs collées, accepte une ligne préfixée par `AgentId=` ou `AgentKey=`, et retire le slash final de l’URL. Elle ne transforme pas un bloc contenant les deux identifiants en une seule valeur valide. La clé n’est jamais affichée dans ces diagnostics.
 
-Télécharger le nouveau `.mq5`, remplacer l’ancien fichier dans `MQL5/Experts`, puis le **recompiler dans MetaEditor** et rattacher l’EA au graphique. Un push GitHub ou un déploiement Render ne remplace pas le `.ex5` déjà installé dans MT5. Vérifier la version 1.01.
+Télécharger le nouveau `.mq5`, remplacer l’ancien fichier dans `MQL5/Experts`, puis le **recompiler dans MetaEditor** et rattacher l’EA au graphique. Un push GitHub ou un déploiement Render ne remplace pas le `.ex5` déjà installé dans MT5. Vérifier la version **1.04** sur le master et chaque suiveur.
 
 - `AgentId` : UUID de 36 caractères généré pour ce terminal, et non son login MT5.
 - `AgentKey` : clé terminal de 64 caractères (`0-9`, `a-f`), et non `COPYTRADING_ADMIN_KEY`. Conserver exactement la casse de la valeur générée.
 - `PollSeconds` : au moins 1 ; valeur par défaut 2.
-- Sur un **SLAVE**, les limites de lots doivent être supérieures à 0 et la limite de perte dans l’intervalle ]0, 100]. Ces limites d’exécution ne bloquent plus le démarrage du **MASTER**, qui observe uniquement les positions.
+- Sur un **SLAVE**, utiliser un compte hedging et une déviation positive ou nulle ; il n’y a plus de paramètres de plafonds de lots ou de perte.
 
 « Paramètres validés » signifie uniquement que les entrées locales sont acceptées. La connexion est confirmée ensuite par l’état connecté et le master en ligne dans l’application. Une clé au bon format mais incorrecte reste refusée par le serveur.
 
@@ -98,17 +95,17 @@ L’EA master observe les positions sans ouvrir d’ordres. La copie des positio
 
 1. Vérifier que le master et les suiveurs apparaissent **en ligne**.
 2. Activer les suiveurs souhaités, puis **Démarrer la copie**.
-3. Par défaut, seules les nouvelles positions observées après le démarrage sont copiées. Pour reprendre des positions existantes, cocher explicitement l’option correspondante avant le démarrage. Les positions déjà connues comme closes ne sont pas réouvertes.
+3. Toutes les positions encore ouvertes du master sont incluses, y compris au démarrage, à l’activation d’un suiveur et à sa reconnexion. Les copies déjà clôturées localement ne sont pas réouvertes automatiquement.
 4. Suivre les commandes, refus et erreurs dans le journal. Les pertes de connexion et commandes sans acquittement sont visibles par compte.
 5. **Pause des nouvelles copies** bloque les ouvertures et augmentations. Les fermetures, réductions et modifications SL/TP des copies existantes restent suivies. Une commande déjà reçue/en cours d’exécution ne peut pas être annulée à distance avec certitude. Ce bouton ne ferme pas toutes les positions.
 
-Réactiver un suiveur remet sa référence de perte session à son equity courante. Modifier multiplicateur, inversion ou correspondance de symboles concerne les nouvelles copies. La correspondance utilise un objet JSON, par exemple `{"EURUSD":"EURUSD.a"}`. Ne mapper que des instruments équivalents : les prix SL/TP sont transmis comme niveaux absolus, sans conversion de devise ou d’échelle.
+Les anciens réglages de multiplicateur, plafonds, inversion et correspondance de symboles ne sont plus utilisés. La commande **Paramètres** a été retirée.
 
 ## 5. Comportement de la réplication
 
 ### Tableaux de suivi — EA 1.02
 
-Installer et recompiler **DerivCopyTradingEA.mq5 version 1.02 sur le master et chaque suiveur**, en conservant leurs `AgentId` et `AgentKey`. Le déploiement du site ne met pas à jour les `.ex5` des terminaux. Les EA 1.00/1.01 peuvent toujours se connecter, mais n’envoient pas les nouvelles statistiques : le tableau affiche « — » pour les valeurs absentes, sans inventer une balance ou un PnL nul.
+Installer et recompiler **DerivCopyTradingEA.mq5 version 1.04 sur le master et chaque suiveur**, en conservant leurs `AgentId` et `AgentKey`. Le déploiement du site ne met pas à jour les `.ex5` des terminaux. Les anciens EA peuvent toujours transmettre leurs données et acquitter les commandes existantes ; aucune nouvelle commande 1:1 ne leur est délivrée. Les EA 1.00/1.01 n’envoient pas les statistiques : le tableau affiche « — » pour les valeurs absentes, sans inventer une balance ou un PnL nul.
 
 Le tableau master présente les positions ouvertes : instrument, identifiant MT5, BUY/SELL, lots, prix d’entrée, prix actuel, SL/TP et PnL flottant (profit + swap). Les cartes présentent :
 
@@ -124,27 +121,28 @@ Les snapshots MT5 sont transmis toutes les `PollSeconds` (2 s par défaut), et l
 
 Références : [propriétés des transactions MQL5](https://www.mql5.com/en/docs/constants/tradingconstants/dealproperties), [sélection de l’historique selon l’heure serveur](https://www.mql5.com/en/docs/trading/historyselect), [propriétés des positions](https://www.mql5.com/en/docs/constants/tradingconstants/positionproperties).
 
-### Plusieurs instruments et copies manquantes — EA 1.03
+### Copie identique — EA 1.04
 
-Il n’existe pas de plafond de quatre positions. Les commandes sont acquittées **une par une par suiveur**, à chaque cycle ; un groupe de positions peut donc nécessiter plusieurs cycles. Les positions doivent être apparues après le démarrage de la copie, sauf reprise explicite des positions existantes.
+- Chaque position du master conserve son **symbole exact, BUY/SELL, volume et SL/TP**. Aucun multiplicateur, plafond personnalisé, inversion ou mapping n’est appliqué, même si l’ancien stockage contient encore ces paramètres.
+- Le serveur vérifie le broker et le serveur transmis par les EA authentifiés. L’EA vérifie également le broker, le compte et le serveur avant l’exécution. Installer **1.04 sur le master et chaque suiveur** : les versions précédentes ne déclarent pas ce protocole et conservent leurs propres plafonds.
+- Toutes les positions exécutées encore ouvertes sont reprises au démarrage ou à la reconnexion. Les ouvertures, augmentations, réductions, clôtures et modifications SL/TP sont synchronisées. Les positions manuelles indépendantes des suiveurs restent intactes.
+- Les ordres en attente ne sont copiés qu’après leur exécution sur le master. La synchronisation est périodique : une position ouverte puis fermée entre deux snapshots peut être manquée. Le prix d’exécution dépend du marché au moment où le suiveur exécute l’ordre.
+- Le moteur n’impose plus le plafond de 300 positions par snapshot ni celui de 15 000 associations. Les transmissions restent soumises à la taille maximale des requêtes de l’API ; un snapshot trop volumineux est refusé intégralement, jamais tronqué.
+- Si une copie se ferme localement par intervention manuelle ou SL/TP, elle n’est pas réouverte automatiquement. La pause continue d’empêcher les nouvelles expositions tout en suivant les réductions et clôtures.
 
-Le plafond **Maximum par copie** s’applique à chaque symbole. Par exemple, si le plafond vaut `0,01` lot et qu’un instrument exige `0,1` lot sur le suiveur, cette copie est refusée. Le volume n’est jamais remonté automatiquement au minimum du broker. Vérifier les **Spécifications** de chaque symbole dans MT5 et les limites serveur **et** terminal avant de modifier les réglages. Les instruments distincts, notamment les variantes `(1s)`, ne doivent pas être associés arbitrairement dans le mapping.
+### Migration des anciennes copies
 
-Dans l’EA **1.03**, trois refus constatés **avant toute exécution d’une nouvelle copie** sont isolés : symbole indisponible, spécifications indisponibles et volume inférieur au minimum. La copie concernée est bloquée avec un motif précis, tandis que les autres copies compatibles continuent. La page distingue les copies ouvertes, celles en attente et les blocages ; **Voir les refus par symbole** affiche l’instrument, la position source et le détail du refus (volume demandé, volume arrondi, minimum et pas).
+Conserver les mêmes identifiants et journaux, déployer le serveur puis installer/recompiler **1.04** sur les terminaux. Une commande déjà en attente doit être acquittée avant migration. Une ancienne commande non exécutée refusée par le nouvel EA doit être vérifiée puis réessayée avec le protocole actuel.
 
-Les refus broker après tentative d’exécution, résultats incertains et erreurs sur une copie existante continuent de mettre le suiveur en pause. Les limites de risque et leurs arrêts restent applicables. Les anciennes versions de l’EA ne fournissent pas les codes permettant d’isoler les refus. Installer/recompiler **1.03 sur chaque suiveur**, en conservant ses identifiants. Cette version conserve également les fonctions de télémétrie de 1.02.
+Lorsqu’un suiveur actif est compatible, une copie précédemment plafonnée reprend le volume exact du master avec son magic existant. Une copie anciennement inversée ou mappée est clôturée avant d’être remplacée par une copie correspondant exactement au master. Cette migration peut donc augmenter le volume et clôturer/remplacer les anciennes copies personnalisées.
 
-Le correctif ne rejoue pas automatiquement les copies bloquées ni celles ignorées pendant une pause. Pour une copie bloquée : mettre le suiveur en pause, attendre l’acquittement, vérifier les positions effectives et le motif, corriger les réglages si souhaité, puis utiliser **Réessayer après vérification** et réactiver le suiveur. Les changements de correspondance de symboles et de multiplicateur restent réservés aux nouvelles copies. Ne pas recréer le terminal ou effacer ses journaux pour contourner une incertitude.
+Les blocages identifiés comme provenant des anciens plafonds de lots sont levés pendant cette migration. Les erreurs génériques, les anciens refus de marge et les résultats incertains restent à réconcilier : mettre le suiveur en pause, attendre l’acquittement, vérifier le terminal, utiliser **Réessayer après vérification**, puis réactiver. Aucun paramètre personnalisé n’est à régler.
 
-### Exécution des copies
+### Refus du broker
 
-- Ouvertures, changements de volume, fermetures partielles/totales et niveaux SL/TP sont synchronisés. Le volume cible est proportionnel au master, plafonné par compte, puis arrondi au pas inférieur autorisé par le broker. Un volume sous le minimum est refusé, pas augmenté automatiquement.
-- L’inversion facultative échange BUY/SELL et les niveaux SL/TP. Le broker peut refuser un niveau incompatible avec son marché.
-- Les ordres en attente ne sont pas copiés avant leur exécution sur le master. Leurs modifications/annulations ne sont donc pas répliquées.
-- Il s’agit d’une synchronisation périodique, pas d’une exécution instantanée. Le délai inclut les cycles du master et du suiveur, le réseau et le broker. Une position ouverte puis fermée entre deux snapshots du master peut être manquée ; ce pont n’est pas adapté à une réplication garantie de positions très brèves.
-- Un suiveur hors ligne ou en pause au moment d’une nouvelle position ne la copie pas automatiquement plus tard. Les copies déjà suivies sont réconciliées à la reconnexion.
-- Si une copie se ferme sur le suiveur, par intervention manuelle ou SL/TP, elle n’est pas réouverte automatiquement.
-- Chaque terminal envoie au maximum 300 positions. Au-delà, la synchronisation est refusée plutôt que d’utiliser un snapshot incomplet. Le journal conserve au maximum 15 000 associations de copies, fermées comprises ; ne pas l’effacer pendant l’exploitation.
+Les refus avant ouverture (symbole indisponible, spécifications manquantes, volume incompatible) et les rejets broker explicitement confirmés sans position ouverte sont isolés à la copie concernée. Le volume du master n’est jamais réduit pour contourner le refus. Le message broker inclut son code, sa description et le lot demandé ; les autres copies continuent. Un acquittement broker perdu conserve le même identifiant de commande et ne renvoie pas un nouvel ordre.
+
+Un manque de marge réel peut toujours empêcher l’exécution, même avec le même broker et serveur. Les résultats incertains et erreurs sur des copies existantes mettent le suiveur en pause pour réconciliation. Les exécutions partielles ou valeurs différentes du master ne sont pas acceptées silencieusement comme une copie exacte.
 
 ## 6. Réponses perdues et reprise
 
@@ -156,9 +154,9 @@ Après un refus ou une incertitude, vérifier les positions et l’historique da
 
 ## 7. Validation avant utilisation
 
-Le dépôt contient des tests du moteur : 50 files distinctes, authentification, anti-répétition, cycle ouverture/fermeture, volumes, limites, panne de stockage et redémarrage. Ils simulent les terminaux ; ils ne remplacent pas la compilation MQL5 et une recette avec le broker.
+Le dépôt contient des tests du moteur : 50 files distinctes, authentification, anti-répétition, cycle ouverture/fermeture, volumes exacts, compatibilité broker/serveur, migration, panne de stockage et redémarrage. Ils simulent les terminaux ; ils ne remplacent pas la compilation MQL5 et une recette avec le broker.
 
-Validation de cette livraison : compilation de production réussie ; 128 tests ciblés réussis, dont 17 tests du moteur copytrading et 9 tests MySQL ; lint des nouveaux modules sans erreur. Les API compilées et l’interface ont été vérifiées avec des comptes simulés. Deux tests généraux (`rendered-html` : métadonnée de prévisualisation ; `ui-components` : utilitaires CSS) échouent aussi sur le commit précédant ces modifications. Le contrôle TypeScript conserve trois erreurs préexistantes liées à Cloudflare dans `db/index.ts` et `worker/index.ts`, sans erreur dans les nouveaux modules. Le stockage MySQL a également été testé sur un serveur MySQL local isolé (9.4) : 50 connexions de suiveurs simulés, transactions concurrentes, rollback, redémarrage, acquittements et réponse COMMIT perdue. Le 20 septembre 2026, une lecture SQL depuis le service web Render vers mysql-frankfurt (MySQL 8.0.24) a réussi. La base derivbot existe ; la table copytrading_state sera initialisée par le module à sa première connexion authentifiée. L’ancienne base en Oregon possède un état initial vide et en pause ; aucune migration de comptes actifs n’est nécessaire. Lors de la livraison initiale, l’EA 1.00 n’avait pas été compilé dans MetaEditor ni testé avec un broker. Le correctif 1.01 a ensuite été compilé avec MetaEditor : 0 erreur, 0 avertissement. Les 20 tests ciblés du moteur, des API et de la copie des identifiants passent, ainsi que la compilation web de production. La connexion d’un terminal réel reste à confirmer après installation de cette version ; aucun ordre broker n’a été exécuté pendant ces vérifications.
+Validation de la version **1.04** : **44 tests ciblés réussis**, dont la copie exacte, la reprise, la migration des anciens paramètres, les refus broker isolés et l’anti-duplication. Le test d’intégration MySQL réel est ignoré faute de serveur de test configuré. Compilation MetaEditor : **0 erreur, 0 avertissement**. Compilation web de production réussie avec `vinext build` ; le wrapper `npm run build` nécessite GNU `timeout`, absent de cette machine. Lint des modules modifiés sans erreur. Le contrôle TypeScript global conserve trois erreurs préexistantes de types Cloudflare (`db/index.ts`, `worker/index.ts`). Aucun ordre n’a été envoyé au broker pendant ces vérifications ; le serveur et les terminaux actifs ne sont pas mis à jour par la compilation locale.
 
 Compiler l’EA dans MetaEditor et commencer avec un master et un suiveur démo. Vérifier une ouverture, un changement SL/TP, une clôture partielle, une clôture totale, une coupure/reconnexion et un redémarrage serveur. Contrôler les volumes exécutés et le nombre d’ordres dans MT5 avant d’étendre progressivement à d’autres suiveurs. Les transactions ne sont pas lancées automatiquement lors de l’installation du module.
 

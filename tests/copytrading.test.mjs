@@ -18,7 +18,7 @@ function harness(n=1,existing=[]){
  let now=1000000,seq=new Map();const e=new CopyEngine(undefined,()=>now);
  function register(role,i=0,settings={}){const auth=e.register({role,label:role+i,account:String(i+1),server:'Demo Server',mode:'demo',settings});return {...auth,a:e.state.agents.find(a=>a.id===auth.id)};}
  const master=register('master');const slaves=Array.from({length:n},(_,i)=>register('slave',i+1));
- function hb(who,positions=who.a.positions,extra={}){const next=(seq.get(who.id)??0)+1;seq.set(who.id,next);return e.heartbeat(e.authenticate(who.id,who.token),{role:who.a.role,account:who.a.account,server:who.a.server,mode:'demo',session:'terminal',seq:next,hedging:true,equity:1000,positions,...extra});}
+ function hb(who,positions=who.a.positions,extra={}){const next=(seq.get(who.id)??0)+1;seq.set(who.id,next);return e.heartbeat(e.authenticate(who.id,who.token),{role:who.a.role,account:who.a.account,server:who.a.server,mode:'demo',session:'terminal',seq:next,hedging:true,broker:'Test Broker',copyProtocol:2,equity:1000,positions,...extra});}
  hb(master,existing);for(const s of slaves){hb(s,[]);e.admin({action:'enable',id:s.id,enabled:true});}e.admin({action:'switch',enabled:true});
  return {e,master,slaves,hb,register,tick:ms=>{now+=ms;},ack(s,c,positions,status='done'){return hb(s,positions,{ack:{id:c.id,status,message:'broker result'}});}};
 }
@@ -81,8 +81,8 @@ test('one master and 50 separately authenticated followers; reject duplicate acc
  assert.equal(new Set(commands.map(c=>c.id)).size,50);assert.equal(new Set(commands.map(c=>c.magic)).size,50);
  for(let i=0;i<50;i++){assert.equal(commands[i].account,h.slaves[i].a.account);assert.equal(h.hb(h.slaves[i]).command.id,commands[i].id);}
 });
-test('existing positions require explicit opt-in and cannot replay on repeated start',()=>{
- const h=harness(1,[pos()]),s=h.slaves[0];assert.equal(h.hb(s).command,null);
+test('existing positions are copied automatically and cannot replay on repeated start',()=>{
+ const h=harness(1,[pos()]),s=h.slaves[0];assert.equal(h.e.state.bindings.length,1);
  h.e.admin({action:'switch',enabled:false});h.e.admin({action:'switch',enabled:true,copyExisting:true});
  const c=h.hb(s).command;assert.equal(c.volume,.5);
  h.e.admin({action:'switch',enabled:true,copyExisting:true});assert.equal(h.e.state.bindings.length,1);
@@ -122,15 +122,16 @@ test('pause or vanished source expires an undelivered opening; transient positio
  }
  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);h.hb(h.master,[]);assert.equal(h.hb(s).command,null);
 });
-test('manual/SL closure is never reopened and rounded broker volumes/stops do not cause repeated orders',()=>{
- const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',.123,{sl:1.050004})]);const c=h.hb(s).command;
- assert.equal(h.ack(s,c,[copied(c,.12,{sl:1.05})]).command,null);assert.equal(h.hb(s).command,null);
- assert.equal(h.hb(s,[]).command,null);h.hb(h.master,[pos('101',.3)]);assert.equal(h.hb(s,[]).command,null);
+test('manual/SL closure is never reopened without a new source position',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+ h.ack(s,c,[copied(c)]);assert.equal(h.hb(s,[]).command,null);
+ h.hb(h.master,[pos('101',.3)]);assert.equal(h.hb(s,[]).command,null);
 });
-test('loss threshold and total lots prevent exposure including manually opened positions',()=>{
- const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);assert.equal(h.hb(s,[],{equity:899}).command,null);assert.equal(s.a.enabled,false);assert.match(s.a.error,/perte/);
- const g=harness(),t=g.slaves[0];g.hb(g.master,[pos()]);assert.equal(g.hb(t,[pos('700',5,{magic:99})]).command,null);
- assert.equal(g.e.state.bindings[0].blocked,true);
+test('exact copy has no loss threshold or total lot ceiling, including manual exposure',()=>{
+ const h=harness(),s=h.slaves[0];s.a.settings={multiplier:.01,maxLot:.01,maxTotalLots:1,lossLimitPct:1,reverse:true,symbols:{EURUSD:'Other'}};
+ h.hb(h.master,[pos('101',20)]);const c=h.hb(s,[pos('700',50,{magic:99})],{equity:1}).command;
+ assert.equal(c.volume,20);assert.equal(c.symbol,'EURUSD');assert.equal(c.side,'BUY');assert.equal(s.a.enabled,true);
+ assert.equal(c.copyProtocol,2);assert.equal(c.broker,'Test Broker');assert.equal(c.maxTotalLots,undefined);assert.equal(c.lossFloor,undefined);
 });
 test('identity, role, hedging, complete snapshots and monotonic sequence are enforced',()=>{
  const h=harness(),s=h.slaves[0];
@@ -147,12 +148,11 @@ test('offline master prevents opening; stale pending and failed acknowledgements
  h.e.admin({action:'retry',id:s.id});h.hb(h.master,[pos()]);h.e.admin({action:'enable',id:s.id,enabled:true});assert.ok(h.hb(s).command);
 });
 test('twelve master positions on two symbols are copied without a four-position ceiling',()=>{
- const h=harness(),s=h.slaves[0];h.e.admin({action:'enable',id:s.id,enabled:false});
- h.e.admin({action:'settings',id:s.id,settings:{maxLot:.01,maxTotalLots:1}});h.e.admin({action:'enable',id:s.id,enabled:true});
+ const h=harness(),s=h.slaves[0];
  const sources=Array.from({length:12},(_,i)=>pos(String(100+i),.1,{symbol:i%2?'Second index':'Volatility 75 Index'}));
  h.hb(h.master,sources);let c=h.hb(s).command;const actual=[];
  for(let i=0;i<12;i++){
-  assert.ok(c);assert.equal(c.volume,.01);actual.push(copied(c,c.volume,{id:String(9000+i)}));
+  assert.ok(c);assert.equal(c.volume,.1);actual.push(copied(c,c.volume,{id:String(9000+i)}));
   c=h.ack(s,c,actual).command;
  }
  assert.equal(c,null);assert.equal(s.a.enabled,true);assert.equal(actual.length,12);assert.equal(new Set(actual.map(p=>p.symbol)).size,2);
@@ -192,20 +192,20 @@ test('broker failures and uncertain outcomes still pause the whole follower',()=
   assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).copyIssues.length,1);
  }
 });
-test('reverse, symbol mapping and multiplier apply per follower and do not alter unrelated positions',()=>{
- const h=harness(),s=h.slaves[0];h.e.admin({action:'enable',id:s.id,enabled:false});h.e.admin({action:'settings',id:s.id,settings:{multiplier:2,maxLot:.7,reverse:true,symbols:{EURUSD:'EURUSD.a'}}});h.e.admin({action:'enable',id:s.id,enabled:true});
- h.hb(h.master,[pos()]);const c=h.hb(s,[pos('300',.1,{magic:888})]).command;
- assert.equal(c.side,'SELL');assert.equal(c.symbol,'EURUSD.a');assert.equal(c.volume,.7);assert.equal(c.sl,1.2);assert.equal(c.tp,1.05);assert.notEqual(c.magic,888);
+test('personalized settings cannot be reintroduced through registration or admin API',()=>{
+ const h=harness(),s=h.slaves[0];h.e.admin({action:'enable',id:s.id,enabled:false});
+ assert.throws(()=>h.e.admin({action:'settings',id:s.id,settings:{multiplier:2}}),/aucun paramètre/);
+ const fresh=h.register('slave',9,{multiplier:2,maxLot:.7,reverse:true,symbols:{EURUSD:'EURUSD.a'}});
+ assert.equal(fresh.a.settings.multiplier,1);assert.equal(fresh.a.settings.reverse,false);assert.equal(Object.keys(fresh.a.settings.symbols).length,0);
 });
 test('master reversal closes the prior side and creates a separate copy for the opposite side',()=>{
  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const open=h.hb(s).command;h.ack(s,open,[copied(open)]);
  h.hb(h.master,[pos('101',.2,{side:'SELL',sl:1.3,tp:1.05})]);const close=h.hb(s).command;assert.equal(close.volume,0);
  const reverse=h.ack(s,close,[]).command;assert.equal(reverse.side,'SELL');assert.notEqual(reverse.magic,open.magic);assert.equal(reverse.volume,.2);
 });
-test('full journal blocks new exposure without blocking existing close reconciliation',()=>{
- const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;h.ack(s,c,[copied(c)]);
- while(h.e.state.bindings.length<15000)h.e.state.bindings.push({...h.e.state.bindings[0],source:'old-'+h.e.state.bindings.length,closed:true});
- h.hb(h.master,[pos('102')]);assert.equal(s.a.enabled,false);assert.match(s.a.error,/Capacité/);assert.equal(h.hb(s).command.volume,0);
+test('more than 300 master positions are accepted without truncation',()=>{
+ const h=harness(),s=h.slaves[0],positions=Array.from({length:301},(_,i)=>pos(String(1000+i),2));
+ h.hb(h.master,positions);assert.equal(h.e.state.bindings.length,301);assert.equal(h.hb(s).command.volume,2);
 });
 test('replacing an empty master does not reuse closed bindings from its predecessor',()=>{
  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;h.ack(s,c,[copied(c)]);h.hb(h.master,[]);h.ack(s,h.hb(s).command,[]);
@@ -276,4 +276,81 @@ test('admin registration accepts Render HTTPS origin behind HTTP and rejects for
   assert.equal((await admin.POST(request('https://foreign.test',{'x-forwarded-host':'foreign.test','x-forwarded-proto':'https'}))).status,403);
   assert.equal((await admin.POST(request('http://localhost:10000',{}, {action:'switch',enabled:false}))).status,200);
  }finally{for(const k of names){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k];}}
+});
+
+test('same broker AND same server are required, and a legacy EA cannot receive exact commands',()=>{
+ for(const extra of [{broker:'Other Broker'},{server:'Other Server'},{copyProtocol:undefined,broker:undefined}]){
+  const h=harness(),s=h.slaves[0];
+  if(extra.server)s.a.server=extra.server;
+  h.hb(h.master,[pos()]);assert.equal(h.hb(s,[],extra).command,null);
+  assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).error,/broker|EA 1.04/);
+ }
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()],{copyProtocol:undefined,broker:undefined});
+ assert.equal(h.hb(s).command,null);
+ h.hb(h.master,[pos()]);assert.equal(h.hb(s).command.volume,.5);
+});
+test('positions missed offline or while paused are copied on reconnection or activation',()=>{
+ const h=harness(),s=h.slaves[0];h.tick(16000);h.hb(h.master,[pos('101',4)]);
+ assert.equal(h.e.state.bindings.length,0);let c=h.hb(s).command;assert.equal(c.volume,4);h.ack(s,c,[copied(c)]);
+ h.e.admin({action:'enable',id:s.id,enabled:false});h.hb(h.master,[pos('101',4),pos('102',12,{symbol:'Step Index'})]);
+ h.e.admin({action:'enable',id:s.id,enabled:true});c=h.hb(s).command;
+ assert.equal(c.symbol,'Step Index');assert.equal(c.volume,12);
+});
+test('persisted capped copies migrate to exact volumes using the original magic',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',15,{symbol:'Step Index'})]);
+ const b=h.e.state.bindings[0];delete b.exact;b.volume=1;b.multiplier=.1;b.opened=true;b.appliedVolume=1;
+ const old=pos('9001',1,{symbol:b.symbol,magic:b.magic});
+ const restored=new CopyEngine(JSON.parse(JSON.stringify(h.e.state)),()=>1000000);
+ const slave=restored.state.agents.find(a=>a.id===s.id);
+ const c=restored.heartbeat(slave,{role:'slave',account:slave.account,server:slave.server,mode:'demo',session:slave.session,seq:slave.seq+1,hedging:true,broker:'Test Broker',copyProtocol:2,equity:1,positions:[old]}).command;
+ assert.equal(c.magic,b.magic);assert.equal(c.volume,15);assert.equal(c.fromVolume,1);
+});
+test('legacy cap refusals are cleared but uncertain results remain blocked',()=>{
+ for(const [lastError,shouldRetry] of [['Volume inférieur au minimum broker après arrondi',true],['Limite totale de 5 lot(s) atteinte',true],['Résultat inconnu',false],[undefined,false]]){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',15)]);
+  const b=h.e.state.bindings[0];delete b.exact;b.volume=1;b.blocked=true;b.lastError=lastError;
+  const c=h.hb(s).command;assert.equal(!!c,shouldRetry);if(c)assert.equal(c.volume,15);
+ }
+});
+test('legacy reversed or mapped copies close before replacement with the exact source',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',3)]);
+ const b=h.e.state.bindings[0];delete b.exact;b.symbol='EURUSD.a';b.side='SELL';b.volume=.7;b.opened=true;
+ const old=pos('9001',.7,{symbol:b.symbol,side:b.side,magic:b.magic});
+ const close=h.hb(s,[old]).command;assert.equal(close.volume,0);assert.equal(close.magic,b.magic);
+ const next=h.ack(s,close,[]).command;
+ assert.equal(next.symbol,'EURUSD');assert.equal(next.side,'BUY');assert.equal(next.volume,3);assert.notEqual(next.magic,b.magic);
+});
+test('migration waits for legacy command acknowledgement before changing its target',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',3)]);const c=h.hb(s).command;
+ delete c.copyProtocol;delete c.broker;c.volume=1;delete h.e.state.bindings[0].exact;
+ assert.equal(h.hb(s).command.id,c.id);assert.equal(h.hb(s).command.volume,1);
+ const next=h.ack(s,c,[copied(c)]).command;assert.equal(next.volume,3);assert.equal(next.fromVolume,1);
+});
+test('exact acknowledgements never silently accept rounded lots or changed stops',()=>{
+ for(const overrides of [{volume:.12},{sl:1.06},{tp:1.3}]){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',.123)]);const c=h.hb(s).command;
+  assert.equal(h.ack(s,c,[copied(c,c.volume,overrides)]).command,null);
+  assert.equal(s.a.enabled,false);assert.match(s.a.error,/valeurs exactes/);
+ }
+});
+test('a confirmed initial broker refusal preserves its details and does not stop other copies',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',2),pos('102',10,{symbol:'Step Index'})]);const c=h.hb(s).command;
+ const ack={id:c.id,status:'skipped',code:'broker_rejected',message:'EURUSD : broker 10019 — No money (lot master 2)'};
+ const next=h.hb(s,[],{ack}).command;assert.equal(next.symbol,'Step Index');assert.equal(next.volume,10);assert.equal(s.a.enabled,true);
+ assert.match(h.e.snapshot().agents.find(a=>a.id===s.id).copyIssues[0].message,/10019/);
+ assert.equal(h.hb(s,[],{ack}).command.id,next.id);
+});
+
+test('an EA downgrade never receives a pending exact-copy command',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',15)]);const c=h.hb(s).command;
+ assert.equal(h.hb(s,[],{copyProtocol:undefined,broker:undefined}).command,null);
+ assert.equal(h.hb(s,[],{copyProtocol:undefined,broker:undefined,seq:1}).command,null);
+ assert.equal(h.hb(s).command.id,c.id);
+});
+test('an inconsistent existing copy cannot allow another queued opening in the same heartbeat',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos('101',1),pos('102',2)]);const c=h.hb(s).command;
+ h.ack(s,c,[copied(c)]);const next=s.a.pending;h.ack(s,next,[copied(c),copied(next,next.volume,{id:'9002'})]);
+ h.hb(h.master,[pos('101',1),pos('102',2),pos('103',3)]);
+ const result=h.hb(s,[copied(c,c.volume,{symbol:'Wrong'}),copied(next,next.volume,{id:'9002'})]);
+ assert.equal(result.command,null);assert.equal(s.a.enabled,false);
 });
