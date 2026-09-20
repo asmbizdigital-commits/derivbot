@@ -74,6 +74,9 @@ export class CopyEngine {
     const agent:Agent={id:randomUUID(),label:str(input.label,"Nom",60),role:input.role,account,server,mode:input.mode,tokenHash:hash(token),enabled:false,settings:parseSettings(),lastSeen:0,session:"",seq:0,equity:0,sessionEquity:0,positions:[],pending:null,lastAck:"",error:""};
     this.state.agents.push(agent);this.log(agent.id,"Terminal enregistré, copie en pause");return {id:agent.id,token};
   }
+  private canEditMasterServer(a:Agent) {
+    return a.role==="master"&&!a.session&&!a.lastSeen&&!a.positions.length&&this.state.baseline===null&&!this.state.bindings.length&&!this.state.agents.some(x=>x.pending);
+  }
   private confirmedUnopened(b:Binding) {
     if(b.opened||(b.appliedVolume??0)>0)return false;
     return b.execution==="not_sent"||b.execution==="not_opened";
@@ -102,6 +105,14 @@ export class CopyEngine {
     }
     const a=this.state.agents.find(a=>a.id===input.id);
     if (!a) throw new Error("Terminal inconnu");
+    if (input.action==="update_master_server") {
+      if(!this.canEditMasterServer(a))throw new Error("Le serveur ne peut être corrigé qu’avant la première connexion du nouveau master. Utilisez Changer de master pour un terminal déjà connecté.");
+      const server=str(input.server,"Serveur MT5");
+      if(this.state.agents.some(x=>x.id!==a.id&&x.account===a.account&&x.server===server))throw new Error("Ce compte est déjà enregistré sur ce serveur.");
+      a.server=server;
+      this.log(a.id,"Serveur du nouveau master corrigé ; identifiants conservés, en attente de connexion MT5");
+      return {};
+    }
     if (input.action==="archive_deleted_slave") {
       if(a.role!=="slave"||this.online(a))throw new Error("Seul un ancien suiveur hors ligne peut être retiré comme compte supprimé.");
       if(input.account!==a.account||input.server!==a.server)throw new Error("Identité du compte supprimé différente. Actualisez la page.");
@@ -261,7 +272,7 @@ export class CopyEngine {
     return {
       enabled:this.state.enabled,limit:50,masterReplacementError:this.masterReplacementError(),
       agents:this.state.agents.map(a=>({
-        id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,
+        id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,canEditServer:this.canEditMasterServer(a),
         enabled:a.enabled,settings:parseSettings(),broker:a.broker??null,copyProtocol:a.copyProtocol??null,lastSeen:a.lastSeen,equity:a.equity,
         sessionEquity:a.sessionEquity,pending:a.pending,error:a.error||compatibility(a),
         online:this.online(a),positionCount:a.positions.length,

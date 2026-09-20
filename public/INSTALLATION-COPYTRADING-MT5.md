@@ -68,6 +68,14 @@ La clé administrateur permet de contrôler toutes les copies. En cas de fuite d
 
 Un stockage persistant configuré est requis pour enregistrer le nouveau master réel. Si la saisie est invalide ou si l’enregistrement échoue, l’ancien master est conservé. Le remplacement d’un compte par un autre ne nécessite pas de recompiler l’EA.
 
+### Nouveau master : aucune transmission et serveur mal renseigné
+
+Après remplacement, **En attente de la première transmission** signifie que le nouveau terminal n’a pas encore transmis ses données. Cela ne prouve pas que son EA est ancien. Le tableau conserve « — » jusqu’à réception des montants et distingue cette attente d’une transmission reçue sans statistiques.
+
+Le **login MT5** est le numéro du compte ; le **serveur MT5 exact** est le nom fourni par le broker. Si le login a été recopié dans le champ serveur, cliquer sur **Corriger le serveur MT5** dans le panneau Master et saisir le nom exact affiché dans MT5. Cette correction est disponible avant la toute première connexion du nouveau master. Elle conserve son login, son mode et ses **AgentId/AgentKey**, et ne démarre aucune copie.
+
+Dans le terminal, vérifier `Role=MASTER`, les nouveaux `AgentId`/`AgentKey` issus du remplacement, la connexion au bon compte/serveur et l’autorisation WebRequest vers l’application. L’EA **1.04** transmet déjà la balance, la devise et le PnL : aucune réinstallation de 1.02 n’est nécessaire. Une fois la première transmission acceptée, les valeurs apparaissent automatiquement.
+
 ### Ancien compte supprimé mais toujours cité pendant le changement de master
 
 Supprimer un compte dans MT5 ne supprime pas automatiquement son enregistrement dans Copytrading. Si le formulaire indique **« Reconnectez … pour vérifier ses copies »** alors que ce compte a été supprimé, utiliser **« Compte supprimé : retirer [nom] du module »** directement dans la fenêtre **Changer de master**. Les champs déjà saisis pour le nouveau master sont conservés et le blocage est recalculé après le retrait.

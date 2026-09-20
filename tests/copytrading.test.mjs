@@ -487,3 +487,19 @@ test('archived deleted account and preserved history survive file-store reload',
   assert.throws(()=>restored.copyTransaction(e=>e.authenticate(old.id,old.token)),/authentifié/);
  }finally{if(original===undefined)delete process.env.COPYTRADING_DATA_DIR;else process.env.COPYTRADING_DATA_DIR=original;rmSync(folder,{recursive:true,force:true});}
 });
+
+test('a newly registered master server can be corrected without replacing credentials or account identity',()=>{
+ const e=new CopyEngine(),auth=e.register({role:'master',label:'New real master',account:'101',server:'101',mode:'real'});
+ const before=e.authenticate(auth.id,auth.token);assert.equal(e.snapshot().agents[0].canEditServer,true);
+ const originalHash=before.tokenHash;
+ e.admin({action:'update_master_server',id:auth.id,server:'  Broker-Live-02  '});
+ const a=e.authenticate(auth.id,auth.token);assert.equal(a.server,'Broker-Live-02');assert.equal(a.account,'101');assert.equal(a.mode,'real');assert.equal(a.tokenHash,originalHash);assert.equal(e.state.enabled,false);
+ const heartbeat={role:'master',account:'101',server:'Broker-Live-02',mode:'real',broker:'Test Broker',copyProtocol:2,session:'new',seq:1,equity:1000,positions:[],metrics:telemetry()};
+ assert.equal(e.heartbeat(a,heartbeat).command,null);assert.equal(e.snapshot().agents[0].metrics.balance,1200);assert.equal(e.snapshot().agents[0].canEditServer,false);
+});
+test('server correction rejects established accounts, duplicate registrations and invalid values without mutation',()=>{
+ const h=harness();for(const who of [h.master,h.slaves[0]]){const before=JSON.stringify(h.e.state);assert.throws(()=>h.e.admin({action:'update_master_server',id:who.id,server:'Other'}),/première connexion/);assert.equal(JSON.stringify(h.e.state),before);}
+ const e=new CopyEngine(),m=e.register({role:'master',label:'New master',account:'101',server:'101',mode:'real'});
+ e.register({role:'slave',label:'Existing',account:'101',server:'Taken',mode:'real'});
+ for(const server of ['',null,'Taken']){const before=JSON.stringify(e.state);assert.throws(()=>e.admin({action:'update_master_server',id:m.id,server}));assert.equal(JSON.stringify(e.state),before);}
+});

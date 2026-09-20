@@ -116,3 +116,14 @@ test('deleted-account action reports a rejected removal inside the replacement f
  view.click('Changer de master');view.render();await view.button('Compte supprimé : retirer Jordy demo du module').props.onClick();view.render();
  assert.ok(view.nodes().some(n=>n.props?.className==='copy-form-error'&&n.props.children==='Le terminal est de nouveau en ligne'));assert.equal(view.button('Remplacer le master').props.disabled,true);
 });
+
+test('new master server correction submits only the server and keeps the issued identity',async()=>{
+ const account={...masterSnapshot.agents[0],account:'101',server:'101',mode:'real',lastSeen:0,online:false,canEditServer:true},requests=[];
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:[account]},fetch:async(url,input)=>{requests.push(JSON.parse(input.body));return {ok:true,json:async()=>({...masterSnapshot,agents:[{...account,server:'Broker-Live-02'}],result:{}})};}});
+ view.click('Corriger le serveur MT5');view.render();
+ const label=view.nodes().find(n=>n.type==='label'&&n.props.children[0]==='Serveur MT5 exact');assert.equal(label.props.children[1].props.value,'');
+ label.props.children[1].props.onChange({target:{value:'Broker-Live-02'}});view.render();
+ assert.ok(!view.nodes().some(n=>n.type==='label'&&n.props.children[0]==='Login MT5'));
+ await view.nodes().find(n=>n.type==='form'&&n.props.className==='copy-registration').props.onSubmit({preventDefault(){}});view.render();
+ assert.deepEqual(requests,[{action:'update_master_server',id:account.id,server:'Broker-Live-02'}]);assert.equal(view.button('Copier AgentId'),null);
+});
