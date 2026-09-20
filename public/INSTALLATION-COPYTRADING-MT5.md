@@ -61,12 +61,20 @@ La clé administrateur permet de contrôler toutes les copies. En cas de fuite d
 
 1. Dans le panneau **Master**, cliquer sur **Changer de master**. Le formulaire sélectionne automatiquement le rôle **Master** et le type de compte **Réel**.
 2. Saisir le nom, le **login MT5 du nouveau compte réel** et son **serveur MT5 exact**, puis cliquer sur **Remplacer le master**. Il n’est pas nécessaire de révoquer puis recréer manuellement les terminaux.
-3. Si des commandes sont en cours, attendre leur acquittement. Les suiveurs associés aux anciennes copies doivent être connectés pour vérifier leur état ; les copies encore ouvertes doivent être clôturées puis synchronisées avant le remplacement. L’interface affiche le compte concerné. Les refus sans position ouverte sont nettoyés lors du remplacement, après cette vérification.
+3. Si des commandes sont en cours, attendre leur acquittement. Les suiveurs associés à des copies exécutées ou à un résultat inconnu doivent être connectés pour vérifier leur état ; les copies encore ouvertes doivent être clôturées puis synchronisées avant le remplacement. Les copies dont aucune commande n’a été envoyée et les refus confirmés sans ouverture ne nécessitent plus de reconnexion. L’interface affiche le compte concerné. Les refus sans position ouverte sont nettoyés lors du remplacement, après cette vérification.
 4. Le changement révoque les identifiants de l’ancien master et conserve **les comptes slaves et leurs AgentId/AgentKey**. La copie et les slaves sont mis en pause. Les positions manuelles indépendantes des slaves restent intactes. Aucune clôture ni ouverture n’est envoyée par l’action de remplacement.
 5. Connecter le terminal MT5 au nouveau compte réel, attacher l’EA **1.04** avec **Role=MASTER**, puis renseigner les nouveaux **AgentId** et **AgentKey** affichés. Le master observe ses positions ; `AllowRealTrading` concerne l’exécution sur les slaves réels.
 6. Attendre que le nouveau master apparaisse **En ligne**, activer les slaves souhaités, puis cliquer sur **Démarrer la copie**. Ses positions déjà ouvertes seront incluses.
 
 Un stockage persistant configuré est requis pour enregistrer le nouveau master réel. Si la saisie est invalide ou si l’enregistrement échoue, l’ancien master est conservé. Le remplacement d’un compte par un autre ne nécessite pas de recompiler l’EA.
+
+### Ancien compte supprimé mais toujours cité pendant le changement de master
+
+Supprimer un compte dans MT5 ne supprime pas automatiquement son enregistrement dans Copytrading. Si le formulaire indique **« Reconnectez … pour vérifier ses copies »** alors que ce compte a été supprimé, utiliser **« Compte supprimé : retirer [nom] du module »** directement dans la fenêtre **Changer de master**. Les champs déjà saisis pour le nouveau master sont conservés et le blocage est recalculé après le retrait.
+
+Cette action est réservée à un ancien **suiveur hors ligne** déclaré supprimé. Elle révoque ses identifiants et retire ses associations du suivi actif. Les dernières positions, commandes et associations sont archivées dans le stockage pour conserver leur trace ; **aucun ordre de clôture ni d’ouverture n’est envoyé**. Si le compte existe encore chez le broker, ses éventuelles positions ne seront plus gérées par ce module. Les autres comptes restent inchangés.
+
+Les anciennes associations dont le résultat n’est pas connu ne sont pas assimilées automatiquement à des copies jamais exécutées. Pour un compte supprimé, l’action de retrait évite d’exiger une reconnexion impossible tout en préservant cet historique.
 
 ## 3. Installer l’EA dans MT5
 

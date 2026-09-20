@@ -99,3 +99,20 @@ test('activating a follower automatically moves it ahead of paused accounts on r
 test('an empty follower table keeps its empty state without misleading pagination',()=>{
  const view=panel(async()=>{}, {data:masterSnapshot});assert.equal(followerRows(view).length,0);assert.equal(view.button('Suivant'),null);
 });
+
+test('deleted-account action in replacement form clears the blocker without losing the new master fields',async()=>{
+ const deleted=follower(0,{label:'Jordy demo',online:false,managedCopies:5}),requests=[];
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:[...masterSnapshot.agents,deleted],masterReplacementError:'Reconnectez Jordy demo pour vérifier ses copies avant de changer de master.'},fetch:async(url,input)=>{requests.push(JSON.parse(input.body));return {ok:true,json:async()=>masterSnapshot};}});
+ view.click('Changer de master');view.render();
+ const login=view.nodes().find(n=>n.type==='label'&&n.props.children[0]==='Login MT5');login.props.children[1].props.onChange({target:{value:'987654'}});view.render();
+ const action=view.button('Compte supprimé : retirer Jordy demo du module');assert.ok(action);assert.equal(action.props.type,'button');assert.equal(view.button('Remplacer le master').props.disabled,true);
+ await action.props.onClick();view.render();
+ assert.deepEqual(requests,[{action:'archive_deleted_slave',id:deleted.id,account:deleted.account,server:deleted.server}]);
+ assert.equal(view.button('Remplacer le master').props.disabled,false);assert.ok(view.nodes().some(n=>n.type==='input'&&n.props.value==='987654'));assert.equal(view.button('Compte supprimé : retirer Jordy demo du module'),null);
+});
+test('deleted-account action reports a rejected removal inside the replacement form',async()=>{
+ const deleted=follower(0,{label:'Jordy demo',online:false,managedCopies:5});
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:[...masterSnapshot.agents,deleted],masterReplacementError:'Reconnectez Jordy demo'},fetch:async()=>({ok:false,json:async()=>({error:'Le terminal est de nouveau en ligne'})})});
+ view.click('Changer de master');view.render();await view.button('Compte supprimé : retirer Jordy demo du module').props.onClick();view.render();
+ assert.ok(view.nodes().some(n=>n.props?.className==='copy-form-error'&&n.props.children==='Le terminal est de nouveau en ligne'));assert.equal(view.button('Remplacer le master').props.disabled,true);
+});

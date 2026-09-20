@@ -397,7 +397,7 @@ test('master replacement refuses pending orders, stale copy snapshots and open c
  for(const scenario of ['pending','open','stale']){
   const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
   if(scenario==='open')h.ack(s,c,[copied(c)]);
-  if(scenario==='stale'){h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'symbol_unavailable',message:'Absent'}});h.tick(16000);}
+  if(scenario==='stale'){h.ack(s,c,[],'uncertain');h.tick(16000);}
   const before=JSON.stringify(h.e.state);assert.ok(h.e.snapshot().masterReplacementError);
   assert.throws(()=>h.e.admin(replacementInput(h)),/acquittement|Clôturez|Reconnectez/);assert.equal(JSON.stringify(h.e.state),before);
  }
@@ -431,4 +431,59 @@ test('real master replacement API requires persistent storage and commits only a
   persistent=true;fail=true;assert.equal((await api.POST(request())).status,422);assert.equal(JSON.stringify(h.e.state),before);
   fail=false;const response=await api.POST(request());assert.equal(response.status,200);const saved=await response.json();assert.ok(saved.result.token);assert.equal(saved.enabled,false);assert.equal(saved.agents.find(a=>a.role==='master').mode,'real');
  }finally{if(original===undefined)delete process.env.COPYTRADING_ADMIN_KEY;else process.env.COPYTRADING_ADMIN_KEY=original;}
+});
+
+test('confirmed unopened copies do not require an offline follower to reconnect for replacement',()=>{
+ for(const scenario of ['queued','refused']){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);
+  if(scenario==='refused'){const c=h.hb(s).command;h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'volume_below_minimum',message:'Below minimum'}});}
+  h.tick(16000);assert.equal(h.e.snapshot().masterReplacementError,'');assert.ok(h.e.admin(replacementInput(h)).token);
+ }
+});
+test('legacy unknown outcomes and retried refused orders still require reconciliation',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+ h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'symbol_unavailable',message:'Absent'}});delete h.e.state.bindings[0].execution;
+ h.tick(16000);assert.match(h.e.snapshot().masterReplacementError,/Reconnectez/);
+ h.hb(h.master,[pos()]);h.hb(s);h.e.admin({action:'enable',id:s.id,enabled:false});h.e.admin({action:'retry',id:s.id});h.e.admin({action:'enable',id:s.id,enabled:true});
+ assert.ok(h.hb(s).command);assert.equal(h.e.state.bindings[0].execution,'unknown');assert.match(h.e.snapshot().masterReplacementError,/acquittement/);
+});
+const archiveDeleted=s=>({action:'archive_deleted_slave',id:s.id,account:s.a.account,server:s.a.server});
+test('declaring a deleted offline account archives legacy bindings and revokes its identity without affecting other slaves',()=>{
+ const h=harness(2),s=h.slaves[0],other=h.slaves[1];s.a.label='Jordy demo';h.hb(h.master,[pos()]);
+ const c=h.hb(s).command;h.ack(s,c,[],'uncertain');delete h.e.state.bindings[0].execution;
+ h.tick(16000);assert.match(h.e.snapshot().masterReplacementError,/Jordy demo/);
+ const otherBefore=JSON.stringify(other.a);const sourceBefore=JSON.stringify(h.master.a);
+ h.e.admin(archiveDeleted(s));assert.equal(h.e.state.agents.some(a=>a.id===s.id),false);assert.equal(h.e.state.bindings.some(b=>b.slave===s.id),false);
+ assert.equal(JSON.stringify(other.a),otherBefore);assert.equal(JSON.stringify(h.master.a),sourceBefore);
+ assert.throws(()=>h.e.authenticate(s.id,s.token),/authentifié/);
+ const archived=h.e.state.archivedFollowers[0];assert.equal(archived.agent.label,'Jordy demo');assert.equal(archived.bindings.length,1);assert.equal(archived.agent.enabled,false);assert.equal('tokenHash' in archived.agent,false);
+ assert.equal('archivedFollowers' in h.e.snapshot(),false);assert.equal(h.e.snapshot().masterReplacementError,'');
+ const replacement=h.e.admin(replacementInput(h));assert.ok(replacement.token);assert.equal(h.e.state.archivedFollowers.length,1);
+});
+test('archiving an explicitly deleted offline account retains outstanding commands and observed positions only in audit history',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+ h.ack(s,c,[copied(c)]);h.hb(h.master,[pos('101',.8)]);const outstanding=h.hb(s).command;
+ h.tick(16000);h.e.admin(archiveDeleted(s));
+ const archived=h.e.state.archivedFollowers[0];assert.equal(archived.agent.pending.id,outstanding.id);assert.equal(archived.agent.positions[0].volume,.5);
+ assert.equal(h.e.state.agents.some(a=>a.pending),false);assert.equal(h.e.snapshot().masterReplacementError,'');
+ h.hb(h.master,[]);assert.equal(h.e.state.bindings.length,0);
+});
+test('declared deleted account must match its identity and be an offline slave',()=>{
+ for(const scenario of ['online','master','wrong-account','wrong-server']){
+  const h=harness(),s=h.slaves[0];if(scenario!=='online')h.tick(16000);
+  const input=scenario==='master'?archiveDeleted(h.master):archiveDeleted(s);
+  if(scenario==='wrong-account')input.account='999';if(scenario==='wrong-server')input.server='Other';
+  const before=JSON.stringify(h.e.state);assert.throws(()=>h.e.admin(input));assert.equal(JSON.stringify(h.e.state),before);
+ }
+});
+test('archived deleted account and preserved history survive file-store reload',()=>{
+ const folder=mkdtempSync(path.join(tmpdir(),'copy-archive-'));const original=process.env.COPYTRADING_DATA_DIR;process.env.COPYTRADING_DATA_DIR=folder;
+ try{
+  const store=moduleAt('lib/copytrading/file-store.ts',{'./engine':model}).exports;
+  const old=store.copyTransaction(e=>e.register({role:'slave',label:'Deleted',account:'2',server:'Demo',mode:'demo'}));
+  store.copyTransaction(e=>e.admin({action:'archive_deleted_slave',id:old.id,account:'2',server:'Demo'}));
+  const saved=JSON.parse(readFileSync(path.join(folder,'state.json'),'utf8'));assert.equal(saved.agents.length,0);assert.equal(saved.archivedFollowers[0].agent.id,old.id);
+  const restored=moduleAt('lib/copytrading/file-store.ts',{'./engine':model}).exports;assert.equal(restored.copySnapshot().agents.length,0);
+  assert.throws(()=>restored.copyTransaction(e=>e.authenticate(old.id,old.token)),/authentifié/);
+ }finally{if(original===undefined)delete process.env.COPYTRADING_DATA_DIR;else process.env.COPYTRADING_DATA_DIR=original;rmSync(folder,{recursive:true,force:true});}
 });

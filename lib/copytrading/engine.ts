@@ -6,8 +6,9 @@ export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volum
 export type Settings = { multiplier: number; maxLot: number; maxTotalLots: number; lossLimitPct: number; reverse: boolean; symbols: Record<string, string> };
 export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; copyProtocol: 2; broker: string };
 export type Agent = { broker?: string; copyProtocol?: number; id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
-type Binding = { exact?: boolean; retired?: boolean; slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
-export type CopyState = { version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
+type Binding = { execution?: "not_sent" | "not_opened" | "unknown" | "opened"; exact?: boolean; retired?: boolean; slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; lastError?:string; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
+type ArchivedFollower = { at:number; agent:Omit<Agent,"tokenHash">; bindings:Binding[] };
+export type CopyState = { archivedFollowers?: ArchivedFollower[]; version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
 export const freshCopyState = (): CopyState => ({ version: 1, enabled: false, agents: [], bindings: [], baseline: null, logs: [] });
 // Zero caps are persisted only for backward-compatible state shape; execution has no custom limits.
 const defaults: Settings = { multiplier: 1, maxLot: 0, maxTotalLots: 0, lossLimitPct: 0, reverse: false, symbols: {} };
@@ -73,11 +74,15 @@ export class CopyEngine {
     const agent:Agent={id:randomUUID(),label:str(input.label,"Nom",60),role:input.role,account,server,mode:input.mode,tokenHash:hash(token),enabled:false,settings:parseSettings(),lastSeen:0,session:"",seq:0,equity:0,sessionEquity:0,positions:[],pending:null,lastAck:"",error:""};
     this.state.agents.push(agent);this.log(agent.id,"Terminal enregistré, copie en pause");return {id:agent.id,token};
   }
+  private confirmedUnopened(b:Binding) {
+    if(b.opened||(b.appliedVolume??0)>0)return false;
+    return b.execution==="not_sent"||b.execution==="not_opened";
+  }
   private masterReplacementError() {
     if(this.state.agents.some(a=>a.pending))return "Attendez l’acquittement des commandes en cours avant de changer de master.";
     for(const a of this.state.agents.filter(a=>a.role==="slave")){
       const bindings=this.state.bindings.filter(b=>b.slave===a.id);
-      if(bindings.some(b=>!b.closed)&&!this.online(a))return `Reconnectez ${a.label} pour vérifier ses copies avant de changer de master.`;
+      if(bindings.some(b=>!b.closed&&!this.confirmedUnopened(b))&&!this.online(a))return `Reconnectez ${a.label} pour vérifier ses copies avant de changer de master.`;
       if(a.positions.some(p=>bindings.some(b=>b.magic===p.magic)))return `Clôturez les copies de l’ancien master sur ${a.label}, puis attendez leur synchronisation.`;
     }
     return "";
@@ -97,6 +102,19 @@ export class CopyEngine {
     }
     const a=this.state.agents.find(a=>a.id===input.id);
     if (!a) throw new Error("Terminal inconnu");
+    if (input.action==="archive_deleted_slave") {
+      if(a.role!=="slave"||this.online(a))throw new Error("Seul un ancien suiveur hors ligne peut être retiré comme compte supprimé.");
+      if(input.account!==a.account||input.server!==a.server)throw new Error("Identité du compte supprimé différente. Actualisez la page.");
+      // Keep unresolved history for audit; revoke credentials and detach, never send a close.
+      const {tokenHash: _tokenHash,...archived}=a;
+      void _tokenHash;
+      this.state.archivedFollowers??=[];
+      this.state.archivedFollowers.push({at:this.now(),agent:{...archived,enabled:false},bindings:this.state.bindings.filter(b=>b.slave===a.id)});
+      this.state.agents=this.state.agents.filter(x=>x.id!==a.id);
+      this.state.bindings=this.state.bindings.filter(b=>b.slave!==a.id);
+      this.log(a.id,`Compte déclaré supprimé : ${a.label} (${a.account}) retiré du module ; identifiants révoqués, historique archivé, aucun ordre envoyé`);
+      return {};
+    }
     if (input.action==="replace_master") {
       if(a.role!=="master")throw new Error("Le master à remplacer a changé. Actualisez la page.");
       const issue=this.masterReplacementError();if(issue)throw new Error(issue);
@@ -137,7 +155,7 @@ export class CopyEngine {
     if(this.state.bindings.some(b=>b.slave===a.id&&b.source===key(p)&&!b.retired))return;
     // Independent magic per copy, within exact JS/MQL integer range.
     let magic:number; do{magic=randomBytes(6).readUIntBE(0,6);}while(magic===0||this.state.bindings.some(b=>b.magic===magic));
-    this.state.bindings.push({slave:a.id,source:key(p),magic,exact:true,symbol:p.symbol,side:p.side,multiplier:1,volume:p.volume,sl:p.sl,tp:p.tp,blocked:false,closed:false});
+    this.state.bindings.push({slave:a.id,source:key(p),magic,execution:"not_sent",exact:true,symbol:p.symbol,side:p.side,multiplier:1,volume:p.volume,sl:p.sl,tp:p.tp,blocked:false,closed:false});
     this.log(a.id,`Copie détectée : ${p.side} ${p.symbol} #${p.id}`);
   }
   private sourceUpdate(master:Agent) {
@@ -179,15 +197,15 @@ export class CopyEngine {
           // Isolate confirmed preflight/broker refusals of a never-opened copy.
           // Unknown execution results and errors on existing copies still require reconciliation.
           if(!["symbol_unavailable","symbol_specs_unavailable","volume_below_minimum","volume_incompatible","broker_rejected"].includes(String(ack.code))||a.pending.fromVolume!==0||a.pending.volume<=0||actual.length||b.opened)throw new Error("Refus local incompatible avec la commande");
-          b.blocked=true;b.lastError=str(ack.message,"Motif du refus",250);
+          b.blocked=true;b.execution="not_opened";b.lastError=str(ack.message,"Motif du refus",250);
         }
-        else if(ack.status!=="done") { b.blocked=true;a.enabled=false;b.lastError=str(ack.message??"Commande refusée","Message",250);a.error=`${b.symbol} : ${b.lastError}`; }
+        else if(ack.status!=="done") { b.execution="unknown";b.blocked=true;a.enabled=false;b.lastError=str(ack.message??"Commande refusée","Message",250);a.error=`${b.symbol} : ${b.lastError}`; }
         else {
           if(actual.some(p=>p.symbol!==b.symbol||p.side!==b.side) || (a.pending.volume===0 && actual.length)) throw new Error("Acquittement incompatible avec les positions");
           if(a.pending.copyProtocol===2 && (Math.abs(actual.reduce((n,p)=>n+p.volume,0)-a.pending.volume)>1e-8 || actual.some(p=>Math.abs(p.sl-a.pending!.sl)>1e-8||Math.abs(p.tp-a.pending!.tp)>1e-8))) {
             b.blocked=true;b.lastError="Exécution différente des valeurs exactes du master";a.enabled=false;a.error=b.lastError;
           }
-          b.appliedVolume=a.pending.volume;b.appliedSl=a.pending.sl;b.appliedTp=a.pending.tp;b.observedSl=actual[0]?.sl;b.observedTp=actual[0]?.tp;b.opened=true;
+          b.execution="opened";b.appliedVolume=a.pending.volume;b.appliedSl=a.pending.sl;b.appliedTp=a.pending.tp;b.observedSl=actual[0]?.sl;b.observedTp=actual[0]?.tp;b.opened=true;
           if(!actual.length)b.closed=true;
         }
         this.log(a.id,`${ack.status} · ${a.pending.symbol} · ${String(ack.message??"").slice(0,250)}`);
@@ -230,6 +248,7 @@ export class CopyEngine {
       if(Math.abs(target-volume)<1e-8 && actual.every(p=>Math.abs(p.sl-b.sl)<1e-8&&Math.abs(p.tp-b.tp)<1e-8))continue;
       // An externally closed copy is not reopened without a new master event.
       if(target===0&&volume===0)continue;
+      b.execution="unknown";
       a.pending={fromVolume:volume,id:randomUUID(),magic:b.magic,symbol:b.symbol,side:b.side,volume:target,sl:b.sl,tp:b.tp,issuedAt:this.now(),expiresAt:target>volume?this.now()+15000:0,account:a.account,server:a.server,mode:a.mode,copyProtocol:2,broker:a.broker!};
       this.log(a.id,`Commande ${a.pending.id} · ${b.symbol} · volume cible ${target}`);
       return {command:a.pending};
