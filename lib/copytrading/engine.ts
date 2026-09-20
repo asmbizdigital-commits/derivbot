@@ -73,6 +73,15 @@ export class CopyEngine {
     const agent:Agent={id:randomUUID(),label:str(input.label,"Nom",60),role:input.role,account,server,mode:input.mode,tokenHash:hash(token),enabled:false,settings:parseSettings(),lastSeen:0,session:"",seq:0,equity:0,sessionEquity:0,positions:[],pending:null,lastAck:"",error:""};
     this.state.agents.push(agent);this.log(agent.id,"Terminal enregistré, copie en pause");return {id:agent.id,token};
   }
+  private masterReplacementError() {
+    if(this.state.agents.some(a=>a.pending))return "Attendez l’acquittement des commandes en cours avant de changer de master.";
+    for(const a of this.state.agents.filter(a=>a.role==="slave")){
+      const bindings=this.state.bindings.filter(b=>b.slave===a.id);
+      if(bindings.some(b=>!b.closed)&&!this.online(a))return `Reconnectez ${a.label} pour vérifier ses copies avant de changer de master.`;
+      if(a.positions.some(p=>bindings.some(b=>b.magic===p.magic)))return `Clôturez les copies de l’ancien master sur ${a.label}, puis attendez leur synchronisation.`;
+    }
+    return "";
+  }
   admin(input: Record<string, unknown>) {
     if (input.action==="register") return this.register(input);
     if (input.action==="switch") {
@@ -88,6 +97,17 @@ export class CopyEngine {
     }
     const a=this.state.agents.find(a=>a.id===input.id);
     if (!a) throw new Error("Terminal inconnu");
+    if (input.action==="replace_master") {
+      if(a.role!=="master")throw new Error("Le master à remplacer a changé. Actualisez la page.");
+      const issue=this.masterReplacementError();if(issue)throw new Error(issue);
+      // Validate/register in a separate state before revoking the old identity.
+      const next=new CopyEngine({...this.state,enabled:false,baseline:null,bindings:[],logs:[...this.state.logs],
+        agents:this.state.agents.filter(x=>x.id!==a.id).map(x=>({...x,enabled:false,error:""}))},this.now);
+      const result=next.register({...input,role:"master"});
+      next.log(result.id,`Master remplacé : ${a.label} (${a.account}) ; suiveurs conservés, copie en pause`);
+      Object.assign(this.state,next.state);
+      return result;
+    }
     if (input.action==="settings") {
       if (a.enabled || a.pending) throw new Error("Mettre le suiveur en pause et attendre la commande en cours");
       throw new Error("Copie identique 1:1 : aucun paramètre personnalisé par suiveur");
@@ -220,7 +240,7 @@ export class CopyEngine {
     const master=this.state.agents.find(a=>a.role==="master");
     const compatibility=(a:Agent)=>a.role!=="slave"?"":a.copyProtocol!==2||master?.copyProtocol!==2||!a.broker?"Installer l’EA 1.04 sur le master et le suiveur pour la copie identique":"";
     return {
-      enabled:this.state.enabled,limit:50,
+      enabled:this.state.enabled,limit:50,masterReplacementError:this.masterReplacementError(),
       agents:this.state.agents.map(a=>({
         id:a.id,label:a.label,role:a.role,account:a.account,server:a.server,mode:a.mode,
         enabled:a.enabled,settings:parseSettings(),broker:a.broker??null,copyProtocol:a.copyProtocol??null,lastSeen:a.lastSeen,equity:a.equity,

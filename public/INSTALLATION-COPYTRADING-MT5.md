@@ -57,6 +57,17 @@ Un terminal MT5 connecté est nécessaire par compte. Plusieurs installations MT
 
 La clé administrateur permet de contrôler toutes les copies. En cas de fuite d’une clé terminal, mettre sa copie en pause, réconcilier/fermer ses positions, puis révoquer son identité. Ne pas supprimer le journal pour contourner une commande en attente.
 
+### Remplacer le master par un nouveau compte réel
+
+1. Dans le panneau **Master**, cliquer sur **Changer de master**. Le formulaire sélectionne automatiquement le rôle **Master** et le type de compte **Réel**.
+2. Saisir le nom, le **login MT5 du nouveau compte réel** et son **serveur MT5 exact**, puis cliquer sur **Remplacer le master**. Il n’est pas nécessaire de révoquer puis recréer manuellement les terminaux.
+3. Si des commandes sont en cours, attendre leur acquittement. Les suiveurs associés aux anciennes copies doivent être connectés pour vérifier leur état ; les copies encore ouvertes doivent être clôturées puis synchronisées avant le remplacement. L’interface affiche le compte concerné. Les refus sans position ouverte sont nettoyés lors du remplacement, après cette vérification.
+4. Le changement révoque les identifiants de l’ancien master et conserve **les comptes slaves et leurs AgentId/AgentKey**. La copie et les slaves sont mis en pause. Les positions manuelles indépendantes des slaves restent intactes. Aucune clôture ni ouverture n’est envoyée par l’action de remplacement.
+5. Connecter le terminal MT5 au nouveau compte réel, attacher l’EA **1.04** avec **Role=MASTER**, puis renseigner les nouveaux **AgentId** et **AgentKey** affichés. Le master observe ses positions ; `AllowRealTrading` concerne l’exécution sur les slaves réels.
+6. Attendre que le nouveau master apparaisse **En ligne**, activer les slaves souhaités, puis cliquer sur **Démarrer la copie**. Ses positions déjà ouvertes seront incluses.
+
+Un stockage persistant configuré est requis pour enregistrer le nouveau master réel. Si la saisie est invalide ou si l’enregistrement échoue, l’ancien master est conservé. Le remplacement d’un compte par un autre ne nécessite pas de recompiler l’EA.
+
 ## 3. Installer l’EA dans MT5
 
 1. Télécharger **DerivCopyTradingEA.mq5** depuis le module.

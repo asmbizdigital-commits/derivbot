@@ -371,3 +371,64 @@ test('an inconsistent existing copy cannot allow another queued opening in the s
  const result=h.hb(s,[copied(c,c.volume,{symbol:'Wrong'}),copied(next,next.volume,{id:'9002'})]);
  assert.equal(result.command,null);assert.equal(s.a.enabled,false);
 });
+
+const replacementInput=(h,extra={})=>({action:'replace_master',id:h.master.id,label:'Master réel',role:'master',account:'987654',server:'Live Server',mode:'real',...extra});
+test('replacing a master creates a fresh real identity and preserves slaves and manual trades paused',()=>{
+ const h=harness(2),s=h.slaves[0];h.hb(s,[pos('700',2,{magic:777})]);
+ const beforeSlaves=h.slaves.map(s=>({id:s.id,tokenHash:s.a.tokenHash,positions:JSON.stringify(s.a.positions)}));
+ const result=h.e.admin(replacementInput(h));
+ const next=h.e.authenticate(result.id,result.token);assert.equal(next.role,'master');assert.equal(next.mode,'real');assert.equal(next.account,'987654');assert.equal(next.server,'Live Server');
+ assert.equal(next.lastSeen,0);assert.equal(next.positions.length,0);assert.equal(h.e.state.baseline,null);assert.equal(h.e.state.enabled,false);
+ assert.throws(()=>h.e.authenticate(h.master.id,h.master.token),/authentifié/);
+ for(const old of beforeSlaves){const slave=h.e.state.agents.find(a=>a.id===old.id);assert.equal(slave.tokenHash,old.tokenHash);assert.equal(slave.enabled,false);assert.equal(JSON.stringify(slave.positions),old.positions);}
+ assert.throws(()=>h.e.admin({action:'switch',enabled:true}),/Connectez le master/);
+ const newMaster={id:result.id,token:result.token,a:next};h.hb(newMaster,[pos()]);
+ const slave={...s,a:h.e.state.agents.find(a=>a.id===s.id)};h.e.admin({action:'enable',id:slave.id,enabled:true});
+ h.e.admin({action:'switch',enabled:true});assert.equal(h.hb(slave).command.volume,.5);
+});
+test('master replacement clears never-opened refusals after a fresh empty follower snapshot',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+ h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'broker_rejected',message:'No money'}});
+ assert.equal(h.e.snapshot().masterReplacementError,'');
+ const result=h.e.admin(replacementInput(h));assert.ok(result.token);assert.equal(h.e.state.bindings.length,0);
+ assert.equal(h.e.snapshot().agents.find(a=>a.id===s.id).copyIssues.length,0);
+});
+test('master replacement refuses pending orders, stale copy snapshots and open copied positions without mutation',()=>{
+ for(const scenario of ['pending','open','stale']){
+  const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+  if(scenario==='open')h.ack(s,c,[copied(c)]);
+  if(scenario==='stale'){h.hb(s,[],{ack:{id:c.id,status:'skipped',code:'symbol_unavailable',message:'Absent'}});h.tick(16000);}
+  const before=JSON.stringify(h.e.state);assert.ok(h.e.snapshot().masterReplacementError);
+  assert.throws(()=>h.e.admin(replacementInput(h)),/acquittement|Clôturez|Reconnectez/);assert.equal(JSON.stringify(h.e.state),before);
+ }
+});
+test('invalid replacement fields, existing slave identity and stale master selection leave all identities unchanged',()=>{
+ for(const extra of [{label:''},{account:'invalid'},{server:''},{mode:'wrong'},{account:'2',server:'Demo Server'},{id:'old-id'}]){
+  const h=harness(),before=JSON.stringify(h.e.state);assert.throws(()=>h.e.admin(replacementInput(h,extra)));assert.equal(JSON.stringify(h.e.state),before);
+  assert.equal(h.e.authenticate(h.master.id,h.master.token).id,h.master.id);
+ }
+ const h=harness(),before=JSON.stringify(h.e.state);assert.throws(()=>h.e.admin(replacementInput(h,{id:h.slaves[0].id})),/master/);assert.equal(JSON.stringify(h.e.state),before);
+});
+test('file storage commits the replacement state, revocation and paused slaves together',()=>{
+ const folder=mkdtempSync(path.join(tmpdir(),'copy-replace-'));const original=process.env.COPYTRADING_DATA_DIR;process.env.COPYTRADING_DATA_DIR=folder;
+ try{
+  const store=moduleAt('lib/copytrading/file-store.ts',{'./engine':model}).exports;
+  const old=store.copyTransaction(e=>e.register({role:'master',label:'Old',account:'1',server:'Demo',mode:'demo'}));
+  const slave=store.copyTransaction(e=>e.register({role:'slave',label:'Slave',account:'2',server:'Demo',mode:'demo'}));
+  const fresh=store.copyTransaction(e=>e.admin({action:'replace_master',id:old.id,label:'Real',account:'10',server:'Live',mode:'real'}));
+  const saved=JSON.parse(readFileSync(path.join(folder,'state.json'),'utf8'));
+  assert.equal(saved.enabled,false);assert.equal(saved.agents.find(a=>a.role==='master').id,fresh.id);assert.equal(saved.agents.some(a=>a.id===old.id),false);assert.ok(saved.agents.some(a=>a.id===slave.id));
+ }finally{if(original===undefined)delete process.env.COPYTRADING_DATA_DIR;else process.env.COPYTRADING_DATA_DIR=original;rmSync(folder,{recursive:true,force:true});}
+});
+test('real master replacement API requires persistent storage and commits only after successful storage',async()=>{
+ const h=harness();let persistent=false,fail=false;
+ const store={copyTransaction:async fn=>{const draft=new CopyEngine(structuredClone(h.e.state),()=>1000000);const result=fn(draft);if(fail)throw Object.assign(new Error('disk'),{code:'EIO'});h.e.state=draft.state;return result;},copyStorageInfo:()=>({persistent,configured:persistent})};
+ const api=moduleAt('app/api/copytrading/admin/route.ts',{'@/lib/copytrading/store':store,'@/lib/copytrading/engine':model}).exports;
+ const original=process.env.COPYTRADING_ADMIN_KEY;process.env.COPYTRADING_ADMIN_KEY='r'.repeat(64);
+ const request=()=>new Request('https://example.test/api/copytrading/admin',{method:'POST',headers:{'x-copy-admin-key':process.env.COPYTRADING_ADMIN_KEY},body:JSON.stringify(replacementInput(h))});
+ try{
+  const before=JSON.stringify(h.e.state);assert.equal((await api.POST(request())).status,409);assert.equal(JSON.stringify(h.e.state),before);
+  persistent=true;fail=true;assert.equal((await api.POST(request())).status,422);assert.equal(JSON.stringify(h.e.state),before);
+  fail=false;const response=await api.POST(request());assert.equal(response.status,200);const saved=await response.json();assert.ok(saved.result.token);assert.equal(saved.enabled,false);assert.equal(saved.agents.find(a=>a.role==='master').mode,'real');
+ }finally{if(original===undefined)delete process.env.COPYTRADING_ADMIN_KEY;else process.env.COPYTRADING_ADMIN_KEY=original;}
+});

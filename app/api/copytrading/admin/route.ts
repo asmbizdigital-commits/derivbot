@@ -32,7 +32,7 @@ export async function POST(request:Request){
     const raw=await request.text();if(raw.length>32768)return reply({error:"Requête trop volumineuse"},413);
     const input=JSON.parse(raw);
     if(!input||typeof input!=="object"||Array.isArray(input))return reply({error:"Requête invalide"},422);
-    if(input.action==="register"&&input.mode==="real"&&(!copyStorageInfo().persistent||!copyStorageInfo().configured))return reply({error:"Configurer un stockage persistant avant d’enregistrer un compte réel."},409);
+    if((input.action==="register"||input.action==="replace_master")&&input.mode==="real"&&(!copyStorageInfo().persistent||!copyStorageInfo().configured))return reply({error:"Configurer un stockage persistant avant d’enregistrer un compte réel."},409);
     const saved=await copyTransaction(engine=>({result:engine.admin(input),...engine.snapshot()}));
     return reply({...saved,storage:copyStorageInfo()});
   }catch(error){return reply({error:error instanceof Error&&!("code" in error)?error.message:"Stockage indisponible, modification non confirmée"},422);}
