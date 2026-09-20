@@ -11,7 +11,7 @@ function panel(writeText,options={}){
  const issued={id:'12345678-1234-1234-1234-123456789abc',token:'ab'.repeat(32)};
  const data=options.data??{enabled:false,limit:50,agents:[],logs:[],storage:{provider:'mysql',persistent:true,configured:true}};
  const state=['',data,'',false,options.data?null:issued,''];let index=0;const notices=[];
- const react={useState(initial){const slot=index++;if(slot>=state.length)state[slot]=initial;return [state[slot],value=>{state[slot]=value;if(slot===5)notices.push(value);}];},useRef:value=>({current:value}),useCallback:fn=>fn,useEffect(){}};
+ const react={useState(initial){const slot=index++;if(slot>=state.length)state[slot]=initial;return [state[slot],value=>{state[slot]=typeof value==='function'?value(state[slot]):value;if(slot===5)notices.push(value);}];},useRef:value=>({current:value}),useCallback:fn=>fn,useEffect(){}};
  const code=ts.transpileModule(readFileSync(new URL('../components/mt5-copytrading-panel.tsx',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
  const exports={};vm.runInNewContext(code,{exports,require:id=>id==='react'?react:id==='./copytrading-monitor'?{CopyTradingMonitor:()=>null}:require(id),navigator:{clipboard:{writeText}},fetch:options.fetch,AbortSignal});
  let root;function render(){index=0;root=exports.Mt5CopyTradingPanel({onActive(){}});}render();
@@ -65,4 +65,37 @@ test('replacement API failures stay in the form without losing the real account 
  view.click('Changer de master');view.render();await view.nodes().find(n=>n.type==='form'&&n.props.className==='copy-registration').props.onSubmit({preventDefault(){}});view.render();
  assert.ok(view.nodes().some(n=>n.props?.className==='copy-form-error'&&n.props.children==='Compte déjà enregistré'));
  assert.ok(view.nodes().some(n=>n.type==='select'&&n.props.value==='real'));assert.ok(view.button('Remplacer le master'));
+});
+
+const follower=(i,extra={})=>({id:'slave-'+i,label:'Compte '+i,role:'slave',account:String(i+100),server:'Demo',mode:'demo',enabled:false,online:true,positions:[],managedCopies:0,pending:null,error:'',...extra});
+const followerRows=view=>Array.from(view.nodes().find(n=>n.type==='tbody').props.children);
+test('follower pagination sorts the complete list by active status before slicing and preserves stable ties',()=>{
+ const followers=Array.from({length:23},(_,i)=>follower(i));followers[1].online=false;followers[21].enabled=true;followers[21].online=false;followers[22].enabled=true;
+ const original=followers.map(a=>a.id),view=panel(async()=>{}, {data:{...masterSnapshot,agents:[...masterSnapshot.agents,...followers]}});
+ assert.deepEqual(followerRows(view).slice(0,4).map(row=>row.key),['slave-22','slave-21','slave-0','slave-2']);
+ assert.equal(followerRows(view).length,10);assert.equal(view.button('Précédent').props.disabled,true);
+ const seen=followerRows(view).map(row=>row.key);
+ view.click('Suivant');view.render();seen.push(...followerRows(view).map(row=>row.key));assert.equal(followerRows(view).length,10);
+ view.click('Suivant');view.render();seen.push(...followerRows(view).map(row=>row.key));assert.equal(followerRows(view).length,3);assert.equal(view.button('Suivant').props.disabled,true);
+ assert.equal(new Set(seen).size,23);assert.deepEqual(followers.map(a=>a.id),original);
+ const size=view.nodes().find(n=>n.type==='select'&&n.props.value===10);size.props.onChange({target:{value:'20'}});view.render();
+ assert.equal(followerRows(view).length,20);assert.equal(followerRows(view)[0].key,'slave-22');assert.equal(view.button('Précédent').props.disabled,true);
+});
+test('deleting the last follower on a page returns to the last valid page and keeps actions bound to the visible account',async()=>{
+ const followers=Array.from({length:21},(_,i)=>follower(i)),requests=[];
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:followers},fetch:async(url,input)=>{requests.push(JSON.parse(input.body));return {ok:true,json:async()=>({...masterSnapshot,agents:followers.slice(0,20)})};}});
+ view.click('Suivant');view.render();view.click('Suivant');view.render();assert.equal(followerRows(view)[0].key,'slave-20');
+ view.click('Révoquer');await new Promise(resolve=>setImmediate(resolve));view.render();
+ assert.deepEqual(requests,[{action:'remove',id:'slave-20'}]);assert.equal(followerRows(view).length,10);assert.equal(followerRows(view)[0].key,'slave-10');assert.equal(view.button('Suivant').props.disabled,true);
+ view.click('Précédent');view.render();assert.equal(followerRows(view)[0].key,'slave-0');
+});
+test('activating a follower automatically moves it ahead of paused accounts on refresh',async()=>{
+ const followers=[follower(0,{online:false}),follower(1),follower(2)],requests=[];
+ const view=panel(async()=>{}, {data:{...masterSnapshot,agents:followers},fetch:async(url,input)=>{requests.push(JSON.parse(input.body));return {ok:true,json:async()=>({...masterSnapshot,agents:followers.map(a=>({...a,enabled:a.id==='slave-2'}))})};}});
+ assert.deepEqual(followerRows(view).map(row=>row.key),['slave-1','slave-2','slave-0']);
+ const row=followerRows(view)[1];row.props.children.at(-1).props.children.props.children[0].props.onClick();
+ await new Promise(resolve=>setImmediate(resolve));view.render();assert.equal(followerRows(view)[0].key,'slave-2');assert.deepEqual(requests,[{action:'enable',id:'slave-2',enabled:true}]);
+});
+test('an empty follower table keeps its empty state without misleading pagination',()=>{
+ const view=panel(async()=>{}, {data:masterSnapshot});assert.equal(followerRows(view).length,0);assert.equal(view.button('Suivant'),null);
 });
