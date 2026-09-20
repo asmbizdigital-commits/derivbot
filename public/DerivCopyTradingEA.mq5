@@ -1,5 +1,5 @@
 #property strict
-#property version "1.01"
+#property version "1.02"
 #property description "One MT5 master / up to 50 hedging followers. No credentials for the trading account leave MT5."
 #include <Trade/Trade.mqh>
 enum CopyRole { MASTER=0, SLAVE=1 };
@@ -29,7 +29,7 @@ string CredentialInput(string value,string name){
  return value;
 }
 int InvalidParameter(string message){
- Print("CopyTrading 1.01 : ",message);
+ Print("CopyTrading 1.02 : ",message);
  Alert("CopyTrading : ",message,"\nCorrigez les données d’entrée puis rattachez l’EA.");
  return INIT_PARAMETERS_INCORRECT;
 }
@@ -66,12 +66,15 @@ bool SafeId(string value){
 string Account(){return IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));}
 string Mode(){return AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO?"demo":"real";}
 string Prefix(){return "Copy_"+effectiveAgentId+"_"+Account()+"_";}
-string Positions(){
+string Positions(double &floatingPnl){
+ floatingPnl=0;
  string result="[";int count=0,total=PositionsTotal();
  for(int i=0;i<total;i++){
   ulong ticket=PositionGetTicket(i);if(ticket==0)return "";
   if(count++>0)result+=",";
-  result+="{\"id\":\""+IntegerToString(PositionGetInteger(POSITION_IDENTIFIER))+"\",\"symbol\":\""+Esc(PositionGetString(POSITION_SYMBOL))+"\",\"side\":\""+(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?"BUY":"SELL")+"\",\"volume\":"+DoubleToString(PositionGetDouble(POSITION_VOLUME),8)+",\"sl\":"+DoubleToString(PositionGetDouble(POSITION_SL),10)+",\"tp\":"+DoubleToString(PositionGetDouble(POSITION_TP),10)+",\"magic\":"+IntegerToString(PositionGetInteger(POSITION_MAGIC))+"}";
+  double profit=PositionGetDouble(POSITION_PROFIT),swap=PositionGetDouble(POSITION_SWAP);
+  floatingPnl+=profit+swap;
+  result+="{\"id\":\""+IntegerToString(PositionGetInteger(POSITION_IDENTIFIER))+"\",\"symbol\":\""+Esc(PositionGetString(POSITION_SYMBOL))+"\",\"side\":\""+(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?"BUY":"SELL")+"\",\"volume\":"+DoubleToString(PositionGetDouble(POSITION_VOLUME),8)+",\"sl\":"+DoubleToString(PositionGetDouble(POSITION_SL),10)+",\"tp\":"+DoubleToString(PositionGetDouble(POSITION_TP),10)+",\"magic\":"+IntegerToString(PositionGetInteger(POSITION_MAGIC))+",\"details\":{\"openPrice\":"+DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN),10)+",\"currentPrice\":"+DoubleToString(PositionGetDouble(POSITION_PRICE_CURRENT),10)+",\"profit\":"+DoubleToString(profit,8)+",\"swap\":"+DoubleToString(swap,8)+"}}";
  }
  if(PositionsTotal()!=total)return "";
  return result+"]";
@@ -173,10 +176,26 @@ void Execute(string json){
  if(!consistent||MathAbs(current-target)>=step/2){Complete(id,"uncertain","Volume exécuté partiel : vérifier le terminal");return;}
  Complete(id,"done","Synchronisation exécutée");
 }
+// Broker-day trading result, excluding deposits/withdrawals and credit operations.
+string Metrics(double floatingPnl){
+ datetime now=TimeCurrent();MqlDateTime parts;TimeToStruct(now,parts);
+ parts.hour=0;parts.min=0;parts.sec=0;datetime day=StructToTime(parts);
+ string date=TimeToString(day,TIME_DATE);StringReplace(date,".","-");
+ bool historyOk=HistorySelect(day,now);double realized=0;int deals=0;
+ if(historyOk)for(int i=0;i<HistoryDealsTotal();i++){
+  ulong ticket=HistoryDealGetTicket(i);if(ticket==0){historyOk=false;break;}
+  long type=HistoryDealGetInteger(ticket,DEAL_TYPE);
+  if(type!=DEAL_TYPE_BUY&&type!=DEAL_TYPE_SELL)continue;
+  realized+=HistoryDealGetDouble(ticket,DEAL_PROFIT)+HistoryDealGetDouble(ticket,DEAL_SWAP)+HistoryDealGetDouble(ticket,DEAL_COMMISSION)+HistoryDealGetDouble(ticket,DEAL_FEE);deals++;
+ }
+ return "{\"balance\":"+DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),8)+",\"currency\":\""+Esc(AccountInfoString(ACCOUNT_CURRENCY))+"\",\"floatingPnl\":"+DoubleToString(floatingPnl,8)+",\"realizedDay\":"+(historyOk?DoubleToString(realized,8):"null")+",\"dealsDay\":"+(historyOk?IntegerToString(deals):"null")+",\"day\":\""+date+"\"}";
+}
 void Sync(){
+ if(!TerminalInfoInteger(TERMINAL_CONNECTED)){Comment("CopyTrading : terminal déconnecté du broker, transmission suspendue.");return;}
  if(busy)return;busy=true;
- string positions=Positions();if(positions==""){busy=false;return;}sequence++;
+ double floatingPnl=0;string positions=Positions(floatingPnl);if(positions==""){busy=false;return;}sequence++;
  string payload="{\"role\":\""+(Role==MASTER?"master":"slave")+"\",\"account\":\""+Account()+"\",\"server\":\""+Esc(AccountInfoString(ACCOUNT_SERVER))+"\",\"mode\":\""+Mode()+"\",\"hedging\":"+(AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING?"true":"false")+",\"session\":\""+sessionId+"\",\"seq\":"+IntegerToString(sequence)+",\"equity\":"+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+",\"positions\":"+positions;
+ payload+=",\"metrics\":"+Metrics(floatingPnl);
  if(ackId!="")payload+=",\"ack\":{\"id\":\""+ackId+"\",\"status\":\""+ackStatus+"\",\"message\":\""+Esc(ackMessage)+"\"}";
  payload+="}";
  char body[],response[];string headers;
@@ -210,7 +229,7 @@ int OnInit(){
  startingEquity=AccountInfoDouble(ACCOUNT_EQUITY);
  sessionId=IntegerToString((long)TimeLocal())+"-"+IntegerToString((long)GetMicrosecondCount())+"-"+IntegerToString(ChartID());
  if(!EventSetTimer(PollSeconds)){Print("CopyTrading : impossible de démarrer le minuteur. Erreur ",GetLastError());FileClose(lockHandle);lockHandle=INVALID_HANDLE;return INIT_FAILED;}
- Print("CopyTrading 1.01 : paramètres validés, connexion au serveur au prochain cycle.");
+ Print("CopyTrading 1.02 : paramètres validés, connexion au serveur au prochain cycle.");
  return INIT_SUCCEEDED;
 }
 void OnTimer(){Sync();}

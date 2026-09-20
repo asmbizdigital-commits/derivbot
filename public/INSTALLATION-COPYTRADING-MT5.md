@@ -48,7 +48,7 @@ Le passage de `file` à `mysql` **ne migre pas automatiquement** les anciens com
 ## 2. Enregistrer le master et les suiveurs
 
 1. Ouvrir **Copytrading** et saisir la clé administrateur. Elle reste en mémoire dans la page, sans stockage dans le navigateur.
-2. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel.
+2. Cliquer sur **Ajouter un terminal** pour ouvrir la fenêtre d’enregistrement. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel. Les réglages d’un suiveur s’ouvrent également en fenêtre modale via **Paramètres**. Une erreur laisse les champs saisis disponibles pour correction.
 3. Conserver `AgentId` et `AgentKey`, affichés une seule fois. Utiliser **Copier AgentId** pour le champ MT5 `AgentId` (36 caractères), puis **Copier AgentKey** pour `AgentKey` (64 caractères). Chaque bouton copie uniquement sa valeur. Ne pas les partager avec d’autres terminaux.
 4. Enregistrer chaque suiveur de la même manière, jusqu’à 50. Un compte déjà enregistré ne peut pas être inscrit une seconde fois avec le même serveur.
 5. Régler individuellement le multiplicateur de lots, le maximum par copie, le maximum total de lots et la perte maximale de session. Les comptes suiveurs doivent être **hedging**, pas netting. Le master peut être hedging ou netting.
@@ -105,6 +105,26 @@ L’EA master observe les positions sans ouvrir d’ordres. La copie des positio
 Réactiver un suiveur remet sa référence de perte session à son equity courante. Modifier multiplicateur, inversion ou correspondance de symboles concerne les nouvelles copies. La correspondance utilise un objet JSON, par exemple `{"EURUSD":"EURUSD.a"}`. Ne mapper que des instruments équivalents : les prix SL/TP sont transmis comme niveaux absolus, sans conversion de devise ou d’échelle.
 
 ## 5. Comportement de la réplication
+
+### Tableaux de suivi — EA 1.02
+
+Installer et recompiler **DerivCopyTradingEA.mq5 version 1.02 sur le master et chaque suiveur**, en conservant leurs `AgentId` et `AgentKey`. Le déploiement du site ne met pas à jour les `.ex5` des terminaux. Les EA 1.00/1.01 peuvent toujours se connecter, mais n’envoient pas les nouvelles statistiques : le tableau affiche « — » pour les valeurs absentes, sans inventer une balance ou un PnL nul.
+
+Le tableau master présente les positions ouvertes : instrument, identifiant MT5, BUY/SELL, lots, prix d’entrée, prix actuel, SL/TP et PnL flottant (profit + swap). Les cartes présentent :
+
+- **Balance** : solde `ACCOUNT_BALANCE` du compte MT5.
+- **Equity** : valeur `ACCOUNT_EQUITY` du compte MT5.
+- **PnL flottant** : somme des profits et swaps des positions ouvertes.
+- **Bénéfice net du jour** : somme `DEAL_PROFIT + DEAL_SWAP + DEAL_COMMISSION + DEAL_FEE` des transactions BUY/SELL depuis minuit, selon la date du **serveur MT5**. Les dépôts, retraits, crédits et écritures de commission séparées de ces transactions ne sont pas inclus. Un résultat négatif est affiché comme une perte.
+- **PnL total** : bénéfice net du jour + PnL flottant actuel. Ce n’est pas un résultat historique depuis l’ouverture du compte : des positions encore ouvertes peuvent avoir été prises avant aujourd’hui.
+
+Le second tableau réunit les suiveurs ayant transmis une position ou une transaction du jour. Ils restent visibles après clôture grâce à un indicateur conservé dans le stockage. Les anciennes copies déjà acquittées sont également reconnues. Chaque ligne conserve **sa propre devise**, son solde, son equity, ses résultats et l’heure de dernière réception. Déplier **Positions ouvertes** affiche le détail, en distinguant les copies du master des autres positions du compte. Les résultats couvrent l’ensemble du compte, y compris ses trades manuels ; ils ne représentent pas uniquement la rentabilité du copytrading.
+
+Les snapshots MT5 sont transmis toutes les `PollSeconds` (2 s par défaut), et la page les récupère toutes les 3 s. Le délai dépend donc des deux cycles et du réseau. Après 15 s sans nouvelle transmission, ou lors d’une erreur de lecture du tableau de bord, les chiffres conservés sont marqués **Données anciennes**. L’EA 1.02 suspend ses transmissions quand MT5 est déconnecté du broker. Si l’historique du jour est indisponible, le réalisé et le total restent indisponibles, tandis que les positions et le solde peuvent encore être affichés.
+
+Références : [propriétés des transactions MQL5](https://www.mql5.com/en/docs/constants/tradingconstants/dealproperties), [sélection de l’historique selon l’heure serveur](https://www.mql5.com/en/docs/trading/historyselect), [propriétés des positions](https://www.mql5.com/en/docs/constants/tradingconstants/positionproperties).
+
+### Exécution des copies
 
 - Ouvertures, changements de volume, fermetures partielles/totales et niveaux SL/TP sont synchronisés. Le volume cible est proportionnel au master, plafonné par compte, puis arrondi au pas inférieur autorisé par le broker. Un volume sous le minimum est refusé, pas augmenté automatiquement.
 - L’inversion facultative échange BUY/SELL et les niveaux SL/TP. Le broker peut refuser un niveau incompatible avec son marché.

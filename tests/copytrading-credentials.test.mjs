@@ -13,7 +13,7 @@ function panel(writeText){
  const state=['',data,'',false,issued,''];let index=0;const notices=[];
  const react={useState(initial){const slot=index++;return [slot<state.length?state[slot]:initial,value=>{if(slot===5)notices.push(value);}];},useRef:value=>({current:value}),useCallback:fn=>fn,useEffect(){}};
  const code=ts.transpileModule(readFileSync(new URL('../components/mt5-copytrading-panel.tsx',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
- const exports={};vm.runInNewContext(code,{exports,require:id=>id==='react'?react:require(id),navigator:{clipboard:{writeText}}});
+ const exports={};vm.runInNewContext(code,{exports,require:id=>id==='react'?react:id==='./copytrading-monitor'?{CopyTradingMonitor:()=>null}:require(id),navigator:{clipboard:{writeText}}});
  const root=exports.Mt5CopyTradingPanel({onActive(){}});
  function find(node,label){
   if(!node)return null;if(Array.isArray(node)){for(const child of node){const hit=find(child,label);if(hit)return hit;}return null;}

@@ -1,9 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; magic: number };
+export type PositionDetails = { openPrice:number; currentPrice:number; profit:number; swap:number };
+export type AccountMetrics = { balance:number; currency:string; floatingPnl:number; realizedDay:number|null; dealsDay:number|null; day:string; receivedAt:number };
+export type Position = { id: string; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; magic: number; details?:PositionDetails };
 export type Settings = { multiplier: number; maxLot: number; maxTotalLots: number; lossLimitPct: number; reverse: boolean; symbols: Record<string, string> };
 export type Command = { fromVolume: number; id: string; magic: number; symbol: string; side: "BUY" | "SELL"; volume: number; sl: number; tp: number; expiresAt: number; issuedAt: number; account: string; server: string; mode: "demo" | "real"; maxTotalLots: number; lossFloor: number };
-export type Agent = { id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string };
+export type Agent = { id: string; label: string; role: "master" | "slave"; account: string; server: string; mode: "demo" | "real"; tokenHash: string; enabled: boolean; settings: Settings; lastSeen: number; session: string; seq: number; equity: number; sessionEquity: number; positions: Position[]; pending: Command | null; lastAck: string; error: string; metrics?:AccountMetrics|null; hasTraded?:boolean };
 type Binding = { slave: string; source: string; magic: number; symbol: string; side: "BUY" | "SELL"; multiplier: number; volume: number; sl: number; tp: number; blocked: boolean; closed: boolean; appliedVolume?: number; opened?: boolean; appliedSl?: number; appliedTp?: number; observedSl?: number; observedTp?: number };
 export type CopyState = { version: 1; enabled: boolean; agents: Agent[]; bindings: Binding[]; baseline: Position[] | null; logs: { at: number; agent: string; message: string }[] };
 export const freshCopyState = (): CopyState => ({ version: 1, enabled: false, agents: [], bindings: [], baseline: null, logs: [] });
@@ -16,6 +18,18 @@ function number(value: unknown, min: number, max: number, name: string) {
   return value;
 }
 function str(value: unknown, name: string, max = 100) { if (typeof value !== "string" || !value.trim() || value.length > max || /[\x00-\x1f]/.test(value)) throw new Error(`${name} invalide`); return value.trim(); }
+function parseMetrics(input:unknown, receivedAt:number):AccountMetrics|null {
+  // Legacy EAs remain usable but must not be shown with invented zero balances/PnL.
+  if(input===undefined||input===null)return null;
+  if(typeof input!=="object"||Array.isArray(input))throw new Error("Statistiques MT5 invalides");
+  const p=input as Record<string,unknown>, day=str(p.day,"Jour MT5",10), currency=str(p.currency,"Devise",12);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(day)||!Number.isFinite(Date.parse(day+"T00:00:00Z")))throw new Error("Jour MT5 invalide");
+  const realizedDay=p.realizedDay===null?null:number(p.realizedDay,-1e15,1e15,"Résultat réalisé");
+  const dealsDay=p.dealsDay===null?null:number(p.dealsDay,0,Number.MAX_SAFE_INTEGER,"Transactions du jour");
+  if(dealsDay!==null&&!Number.isInteger(dealsDay))throw new Error("Transactions du jour invalides");
+  if((realizedDay===null)!==(dealsDay===null))throw new Error("Historique MT5 incomplet");
+  return {balance:number(p.balance,-1e15,1e15,"Balance"),currency,floatingPnl:number(p.floatingPnl,-1e15,1e15,"PnL flottant"),realizedDay,dealsDay,day,receivedAt};
+}
 export function parseSettings(input: unknown): Settings {
   const d = { ...defaults, ...(input && typeof input === "object" ? input : {}) } as Settings;
   if (typeof d.reverse !== "boolean" || !d.symbols || Array.isArray(d.symbols) || typeof d.symbols !== "object" || Object.keys(d.symbols).length > 100) throw new Error("Paramètres invalides");
@@ -33,7 +47,13 @@ export function parsePositions(input: unknown): Position[] {
     ids.add(id);
     const magic = number(p.magic,0,Number.MAX_SAFE_INTEGER,"Magic");
     if (!Number.isSafeInteger(magic)) throw new Error("Magic invalide");
-    return { id,symbol:str(p.symbol,"Symbole",80),side:p.side,volume:number(p.volume,.00000001,100000,"Volume"),sl:number(p.sl,0,1e15,"SL"),tp:number(p.tp,0,1e15,"TP"),magic };
+    let details:PositionDetails|undefined;
+    if(p.details!==undefined){
+      const d=p.details;
+      if(!d||typeof d!=="object"||Array.isArray(d))throw new Error("Détails position invalides");
+      details={openPrice:number(d.openPrice,0,1e15,"Prix entrée"),currentPrice:number(d.currentPrice,0,1e15,"Prix actuel"),profit:number(d.profit,-1e15,1e15,"Profit position"),swap:number(d.swap,-1e15,1e15,"Swap")};
+    }
+    return { id,symbol:str(p.symbol,"Symbole",80),side:p.side,volume:number(p.volume,.00000001,100000,"Volume"),sl:number(p.sl,0,1e15,"SL"),tp:number(p.tp,0,1e15,"TP"),magic,...(details?{details}:{}) };
   });
 }
 
@@ -134,9 +154,10 @@ export class CopyEngine {
     if(!Number.isInteger(seq))throw new Error("Séquence invalide");
     if(a.session&&a.session!==session&&this.online(a))throw new Error("Un autre EA est déjà connecté avec cette identité");
     if(a.session===session&&seq<=a.seq)return {command:a.pending};
-    const positions=parsePositions(input.positions), equity=number(input.equity,0,1e15,"Equity");
+    const positions=parsePositions(input.positions), equity=number(input.equity,0,1e15,"Equity"), metrics=parseMetrics(input.metrics,this.now());
     const previous=this.state.baseline;
-    a.session=session;a.seq=seq;a.lastSeen=this.now();a.equity=equity;a.positions=positions;
+    a.session=session;a.seq=seq;a.lastSeen=this.now();a.equity=equity;a.positions=positions;a.metrics=metrics;
+    a.hasTraded=!!a.hasTraded||positions.length>0||(metrics?.dealsDay??0)>0;
     if(a.role==="master"){this.sourceUpdate(a,previous);return {command:null};}
     if(input.ack){
       const ack=input.ack as Record<string,unknown>;
@@ -188,6 +209,8 @@ export class CopyEngine {
         enabled:a.enabled,settings:a.settings,lastSeen:a.lastSeen,equity:a.equity,
         sessionEquity:a.sessionEquity,pending:a.pending,error:a.error,
         online:this.online(a),positionCount:a.positions.length,
+        metrics:a.metrics??null,hasTraded:!!a.hasTraded||a.positions.length>0||this.state.bindings.some(b=>b.slave===a.id&&b.opened),
+        positions:a.positions.map(p=>({...p,copied:a.role==="slave"&&this.state.bindings.some(b=>b.slave===a.id&&b.magic===p.magic)})),
         managedCopies:this.state.bindings.filter(b=>b.slave===a.id&&!b.closed).length,
       })),
       logs:this.state.logs.slice(0,200),

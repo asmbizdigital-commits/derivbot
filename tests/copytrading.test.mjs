@@ -24,6 +24,52 @@ function harness(n=1,existing=[]){
 }
 const pos=(id='101',volume=.5,extra={})=>({id,symbol:'EURUSD',side:'BUY',volume,sl:1.05,tp:1.2,magic:0,...extra});
 const copied=(c,volume=c.volume,extra={})=>pos('9001',volume,{symbol:c.symbol,side:c.side,sl:c.sl,tp:c.tp,magic:c.magic,...extra});
+const telemetry=(extra={})=>({balance:1200,currency:'USD',floatingPnl:-12.5,realizedDay:30.25,dealsDay:2,day:'2026-09-20',...extra});
+
+test('account metrics and live position details are authenticated, persisted and replaced on each heartbeat',()=>{
+ const h=harness(),details={openPrice:1.12,currentPrice:1.11,profit:-10,swap:-2.5};
+ h.hb(h.master,[pos('101',.5,{details})],{equity:1187.5,metrics:telemetry()});
+ let master=h.e.snapshot().agents.find(a=>a.id===h.master.id);
+ assert.equal(master.metrics.balance,1200);assert.equal(master.metrics.floatingPnl,-12.5);assert.equal(master.metrics.receivedAt,1000000);
+ assert.equal(master.positions[0].details.profit,-10);assert.equal(master.hasTraded,true);
+ assert.ok(!JSON.stringify(master).includes(h.master.token));assert.ok(!('tokenHash' in master));
+ h.tick(2000);h.hb(h.master,[],{equity:1235,metrics:telemetry({balance:1235,floatingPnl:0,realizedDay:35})});
+ master=h.e.snapshot().agents.find(a=>a.id===h.master.id);
+ assert.equal(master.positions.length,0);assert.equal(master.metrics.realizedDay,35);assert.equal(master.hasTraded,true);
+ const restored=new CopyEngine(JSON.parse(JSON.stringify(h.e.state)),()=>1018000).snapshot().agents.find(a=>a.id===h.master.id);
+ assert.equal(restored.metrics.balance,1235);assert.equal(restored.metrics.receivedAt,1002000);assert.equal(restored.online,false);
+});
+test('legacy EAs and unavailable history are distinct from a genuine zero result',()=>{
+ const h=harness();assert.equal(h.e.snapshot().agents[0].metrics,null);
+ h.hb(h.master,[],{metrics:telemetry({realizedDay:null,dealsDay:null})});
+ assert.equal(h.e.snapshot().agents[0].metrics.realizedDay,null);
+ h.hb(h.master,[],{metrics:telemetry({floatingPnl:0,realizedDay:0,dealsDay:0})});
+ assert.equal(h.e.snapshot().agents[0].metrics.realizedDay,0);
+ h.hb(h.master,[]);assert.equal(h.e.snapshot().agents[0].metrics,null,'an older EA must not refresh stale financial values');
+});
+test('bad telemetry is rejected before changing balances, snapshots or heartbeat sequence',()=>{
+ for(const metrics of [telemetry({balance:Infinity}),telemetry({realizedDay:'12'}),telemetry({currency:''}),telemetry({day:'invalid'}),telemetry({dealsDay:1.5}),telemetry({realizedDay:null}),[]]){
+  const h=harness();const before=JSON.stringify(h.e.state);
+  assert.throws(()=>h.hb(h.master,[],{metrics}));assert.equal(JSON.stringify(h.e.state),before);
+ }
+ const h=harness();assert.throws(()=>h.hb(h.master,[pos('101',.5,{details:{openPrice:1,currentPrice:1,profit:NaN,swap:0}})]),/Profit/);
+});
+test('slave monitor distinguishes actual copies from manual positions and retains traders after closing',()=>{
+ const h=harness(),s=h.slaves[0];h.hb(h.master,[pos()]);const c=h.hb(s).command;
+ h.ack(s,c,[copied(c),pos('222',.1)]);
+ h.hb(s,[copied(c),pos('222',.1)],{metrics:telemetry({currency:'EUR'})});
+ let snap=h.e.snapshot().agents.find(a=>a.id===s.id);
+ assert.equal(snap.positions[0].copied,true);assert.equal(snap.positions[1].copied,false);assert.equal(snap.metrics.currency,'EUR');
+ h.hb(s,[],{metrics:telemetry({dealsDay:0,floatingPnl:0})});
+ snap=h.e.snapshot().agents.find(a=>a.id===s.id);assert.equal(snap.hasTraded,true);assert.equal(snap.positions.length,0);
+ const noPositions=harness();noPositions.hb(noPositions.master,[],{metrics:telemetry({dealsDay:1})});
+ assert.equal(noPositions.e.snapshot().agents[0].hasTraded,true,'history reports trades that closed between snapshots');
+});
+test('replayed telemetry cannot overwrite a newer result or trigger duplicate orders',()=>{
+ const h=harness();h.hb(h.master,[],{metrics:telemetry()});const before=JSON.stringify(h.e.state);
+ h.hb(h.master,[],{seq:h.master.a.seq,metrics:telemetry({balance:99999})});
+ assert.equal(JSON.stringify(h.e.state),before);
+});
 
 test('one master and 50 separately authenticated followers; reject duplicate accounts and follower 51',()=>{
  const h=harness(50);assert.equal(h.e.state.agents.length,51);
