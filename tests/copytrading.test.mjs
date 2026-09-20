@@ -155,3 +155,33 @@ test('API authentication, real storage requirement, account isolation and disk f
   failDisk=false;assert.equal((await agent.POST(request(hb,valid))).status,200);
  }finally{if(original===undefined)delete process.env.COPYTRADING_ADMIN_KEY;else process.env.COPYTRADING_ADMIN_KEY=original;}
 });
+
+test('admin registration accepts Render HTTPS origin behind HTTP and rejects forged origins',async()=>{
+ const names=['COPYTRADING_ADMIN_KEY','COPYTRADING_PUBLIC_URL','RENDER_EXTERNAL_URL'];
+ const saved=Object.fromEntries(names.map(k=>[k,process.env[k]]));
+ const e=new CopyEngine();let writes=0;
+ const store={copyTransaction:async fn=>{writes++;return fn(e);},copySnapshot:async()=>e.snapshot(),copyStorageInfo:()=>({provider:'mysql',persistent:true,configured:true})};
+ const admin=moduleAt('app/api/copytrading/admin/route.ts',{'@/lib/copytrading/store':store,'@/lib/copytrading/engine':model}).exports;
+ const publicUrl='https://derivbot-qnwz.onrender.com';
+ const input={action:'register',role:'master',label:'Master',account:'123',server:'Demo',mode:'demo'};
+ const request=(origin,extra={},body=input)=>new Request('http://localhost:10000/api/copytrading/admin',{method:'POST',headers:{'x-copy-admin-key':process.env.COPYTRADING_ADMIN_KEY,origin,...extra},body:JSON.stringify(body)});
+ try{
+  process.env.COPYTRADING_ADMIN_KEY='k'.repeat(64);process.env.RENDER_EXTERNAL_URL=publicUrl;delete process.env.COPYTRADING_PUBLIC_URL;
+  for(const origin of ['https://foreign.test',publicUrl+'.evil.test','http://derivbot-qnwz.onrender.com','null','http://localhost:10000']){
+   assert.equal((await admin.POST(request(origin,{'x-forwarded-host':new URL(publicUrl).host,'x-forwarded-proto':'https'}))).status,403);
+  }
+  assert.equal((await admin.POST(request(publicUrl,{'x-copy-admin-key':'wrong'}))).status,401);
+  assert.equal(writes,0);
+  const response=await admin.POST(request(publicUrl));assert.equal(response.status,200);
+  const result=await response.json();assert.match(result.result.id,/^[a-f0-9-]{36}$/);assert.match(result.result.token,/^[a-f0-9]{64}$/);
+  assert.equal(e.state.agents.length,1);assert.equal(e.state.enabled,false);
+  process.env.COPYTRADING_PUBLIC_URL='https://copy.example.test';
+  assert.equal((await admin.POST(request(publicUrl))).status,403);
+  assert.equal((await admin.POST(request('https://copy.example.test',{}, {action:'switch',enabled:false}))).status,200);
+  process.env.COPYTRADING_PUBLIC_URL='invalid-url';
+  assert.equal((await admin.POST(request(publicUrl))).status,503);
+  delete process.env.COPYTRADING_PUBLIC_URL;delete process.env.RENDER_EXTERNAL_URL;
+  assert.equal((await admin.POST(request('https://foreign.test',{'x-forwarded-host':'foreign.test','x-forwarded-proto':'https'}))).status,403);
+  assert.equal((await admin.POST(request('http://localhost:10000',{}, {action:'switch',enabled:false}))).status,200);
+ }finally{for(const k of names){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k];}}
+});

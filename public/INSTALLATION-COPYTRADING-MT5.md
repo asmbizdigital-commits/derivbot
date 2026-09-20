@@ -21,6 +21,7 @@ Dans Render, ouvrir le service web `derivbot` → **Environment** et renseigner 
 | `MYSQL_PASSWORD` | Mot de passe de cet utilisateur, saisi uniquement dans les variables privées Render. |
 | `MYSQL_SSL` | `false` pour la connexion privée au service MySQL du Blueprint standard ; `true` pour un serveur configuré avec TLS. La validation du certificat reste activée en mode TLS. |
 | `MYSQL_SSL_CA` | Facultatif : certificat d’autorité pour un serveur TLS avec une CA privée. |
+| `COPYTRADING_PUBLIC_URL` | Facultatif : URL publique exacte si vous utilisez un domaine personnalisé. Sur Render, le contrôle d’origine utilise automatiquement `RENDER_EXTERNAL_URL` pour le domaine `onrender.com`, même lorsque la connexion interne est en HTTP. |
 
 Le service web et MySQL doivent appartenir au **même workspace et à la même région**. Vérification du 20 septembre 2026 : le service web `derivbot` et le nouveau service `mysql-frankfurt` sont tous deux à **Francfort**. Une connexion SQL depuis le service web vers la base `derivbot` a réussi avec l’utilisateur applicatif `derivbot`. L’adresse interne n’est pas directement accessible depuis un ordinateur hors Render. Pour développer localement, utiliser une base locale ou un tunnel explicitement configuré.
 

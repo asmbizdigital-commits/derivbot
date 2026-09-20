@@ -8,7 +8,18 @@ function authorize(request:Request){
   if(!expected||expected.length<32)return reply({error:"Configurer COPYTRADING_ADMIN_KEY (au moins 32 caractères) sur le serveur."},503);
   if(!secretEqual(request.headers.get("x-copy-admin-key")||"",expected))return reply({error:"Clé administrateur invalide"},401);
   const origin=request.headers.get("origin");
-  if(origin&&origin!==new URL(request.url).origin)return reply({error:"Origine refusée"},403);
+  if(origin){
+    // Render terminates HTTPS before vinext: request.url can contain internal HTTP.
+    // Trust the server-configured public URL, never client-supplied proxy headers.
+    const publicUrl=process.env.COPYTRADING_PUBLIC_URL||process.env.RENDER_EXTERNAL_URL;
+    let allowedOrigin:string;
+    try{
+      const url=new URL(publicUrl||request.url);
+      if(!["https:","http:"].includes(url.protocol)||url.username||url.password)throw new Error("URL invalide");
+      allowedOrigin=url.origin;
+    }catch{return reply({error:"URL publique copytrading invalide sur le serveur."},503);}
+    if(origin!==allowedOrigin)return reply({error:"Origine refusée"},403);
+  }
   return null;
 }
 export async function GET(request:Request){
