@@ -49,7 +49,7 @@ Le passage de `file` à `mysql` **ne migre pas automatiquement** les anciens com
 
 1. Ouvrir **Copytrading** et saisir la clé administrateur. Elle reste en mémoire dans la page, sans stockage dans le navigateur.
 2. Enregistrer le master avec son nom, son **login MT5 numérique**, le **nom exact du serveur MT5** et le mode démo/réel.
-3. Conserver `AgentId` et `AgentKey`, affichés une seule fois. Ne pas les partager avec d’autres terminaux.
+3. Conserver `AgentId` et `AgentKey`, affichés une seule fois. Utiliser **Copier AgentId** pour le champ MT5 `AgentId` (36 caractères), puis **Copier AgentKey** pour `AgentKey` (64 caractères). Chaque bouton copie uniquement sa valeur. Ne pas les partager avec d’autres terminaux.
 4. Enregistrer chaque suiveur de la même manière, jusqu’à 50. Un compte déjà enregistré ne peut pas être inscrit une seconde fois avec le même serveur.
 5. Régler individuellement le multiplicateur de lots, le maximum par copie, le maximum total de lots et la perte maximale de session. Les comptes suiveurs doivent être **hedging**, pas netting. Le master peut être hedging ou netting.
 
@@ -78,6 +78,19 @@ La clé administrateur permet de contrôler toutes les copies. En cas de fuite d
 | `DeviationPoints` | Déviation autorisée à l’exécution, en points MT5, 20 par défaut. |
 
 Les limites serveur **et** terminal s’appliquent : le réglage le plus restrictif prévaut. Une modification des limites côté interface ne supprime pas celles de l’EA. La limite de perte bloque les nouvelles expositions ; elle ne liquide pas toutes les positions et ne garantit pas un montant maximal de perte. Les positions et opérations manuelles du compte entrent dans le total des lots et l’equity.
+
+### Si MT5 retire l’EA avec « incorrect parameters »
+
+La version **1.01** remplace le message général « Paramètres copytrading invalides » par une alerte indiquant précisément le champ refusé. Elle retire les espaces, tabulations et retours à la ligne aux extrémités des valeurs collées, accepte une ligne préfixée par `AgentId=` ou `AgentKey=`, et retire le slash final de l’URL. Elle ne transforme pas un bloc contenant les deux identifiants en une seule valeur valide. La clé n’est jamais affichée dans ces diagnostics.
+
+Télécharger le nouveau `.mq5`, remplacer l’ancien fichier dans `MQL5/Experts`, puis le **recompiler dans MetaEditor** et rattacher l’EA au graphique. Un push GitHub ou un déploiement Render ne remplace pas le `.ex5` déjà installé dans MT5. Vérifier la version 1.01.
+
+- `AgentId` : UUID de 36 caractères généré pour ce terminal, et non son login MT5.
+- `AgentKey` : clé terminal de 64 caractères (`0-9`, `a-f`), et non `COPYTRADING_ADMIN_KEY`. Conserver exactement la casse de la valeur générée.
+- `PollSeconds` : au moins 1 ; valeur par défaut 2.
+- Sur un **SLAVE**, les limites de lots doivent être supérieures à 0 et la limite de perte dans l’intervalle ]0, 100]. Ces limites d’exécution ne bloquent plus le démarrage du **MASTER**, qui observe uniquement les positions.
+
+« Paramètres validés » signifie uniquement que les entrées locales sont acceptées. La connexion est confirmée ensuite par l’état connecté et le master en ligne dans l’application. Une clé au bon format mais incorrecte reste refusée par le serveur.
 
 L’EA master observe les positions sans ouvrir d’ordres. La copie des positions d’autres EA du compte master est donc possible. Sur les suiveurs, seules les positions portant le magic de la copie sont gérées. Ne pas faire gérer ces positions simultanément par un autre logiciel.
 
@@ -113,7 +126,7 @@ Après un refus ou une incertitude, vérifier les positions et l’historique da
 
 Le dépôt contient des tests du moteur : 50 files distinctes, authentification, anti-répétition, cycle ouverture/fermeture, volumes, limites, panne de stockage et redémarrage. Ils simulent les terminaux ; ils ne remplacent pas la compilation MQL5 et une recette avec le broker.
 
-Validation de cette livraison : compilation de production réussie ; 128 tests ciblés réussis, dont 17 tests du moteur copytrading et 9 tests MySQL ; lint des nouveaux modules sans erreur. Les API compilées et l’interface ont été vérifiées avec des comptes simulés. Deux tests généraux (`rendered-html` : métadonnée de prévisualisation ; `ui-components` : utilitaires CSS) échouent aussi sur le commit précédant ces modifications. Le contrôle TypeScript conserve trois erreurs préexistantes liées à Cloudflare dans `db/index.ts` et `worker/index.ts`, sans erreur dans les nouveaux modules. Le stockage MySQL a également été testé sur un serveur MySQL local isolé (9.4) : 50 connexions de suiveurs simulés, transactions concurrentes, rollback, redémarrage, acquittements et réponse COMMIT perdue. Le 20 septembre 2026, une lecture SQL depuis le service web Render vers mysql-frankfurt (MySQL 8.0.24) a réussi. La base derivbot existe ; la table copytrading_state sera initialisée par le module à sa première connexion authentifiée. L’ancienne base en Oregon possède un état initial vide et en pause ; aucune migration de comptes actifs n’est nécessaire. L’EA MQL5 n’a pas été compilé dans MetaEditor ni testé avec un broker lors de cette livraison.
+Validation de cette livraison : compilation de production réussie ; 128 tests ciblés réussis, dont 17 tests du moteur copytrading et 9 tests MySQL ; lint des nouveaux modules sans erreur. Les API compilées et l’interface ont été vérifiées avec des comptes simulés. Deux tests généraux (`rendered-html` : métadonnée de prévisualisation ; `ui-components` : utilitaires CSS) échouent aussi sur le commit précédant ces modifications. Le contrôle TypeScript conserve trois erreurs préexistantes liées à Cloudflare dans `db/index.ts` et `worker/index.ts`, sans erreur dans les nouveaux modules. Le stockage MySQL a également été testé sur un serveur MySQL local isolé (9.4) : 50 connexions de suiveurs simulés, transactions concurrentes, rollback, redémarrage, acquittements et réponse COMMIT perdue. Le 20 septembre 2026, une lecture SQL depuis le service web Render vers mysql-frankfurt (MySQL 8.0.24) a réussi. La base derivbot existe ; la table copytrading_state sera initialisée par le module à sa première connexion authentifiée. L’ancienne base en Oregon possède un état initial vide et en pause ; aucune migration de comptes actifs n’est nécessaire. Lors de la livraison initiale, l’EA 1.00 n’avait pas été compilé dans MetaEditor ni testé avec un broker. Le correctif 1.01 a ensuite été compilé avec MetaEditor : 0 erreur, 0 avertissement. Les 20 tests ciblés du moteur, des API et de la copie des identifiants passent, ainsi que la compilation web de production. La connexion d’un terminal réel reste à confirmer après installation de cette version ; aucun ordre broker n’a été exécuté pendant ces vérifications.
 
 Compiler l’EA dans MetaEditor et commencer avec un master et un suiveur démo. Vérifier une ouverture, un changement SL/TP, une clôture partielle, une clôture totale, une coupure/reconnexion et un redémarrage serveur. Contrôler les volumes exécutés et le nombre d’ordres dans MT5 avant d’étendre progressivement à d’autres suiveurs. Les transactions ne sont pas lancées automatiquement lors de l’installation du module.
 

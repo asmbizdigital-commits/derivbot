@@ -1,5 +1,5 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "One MT5 master / up to 50 hedging followers. No credentials for the trading account leave MT5."
 #include <Trade/Trade.mqh>
 enum CopyRole { MASTER=0, SLAVE=1 };
@@ -19,6 +19,25 @@ long sequence=0;
 double startingEquity=0;
 int lockHandle=INVALID_HANDLE;
 bool busy=false;
+string effectiveAgentId="", effectiveAgentKey="", effectiveApiUrl="";
+
+string TrimInput(string value){StringTrimLeft(value);StringTrimRight(value);return value;}
+// Accept one labelled line from the old clipboard button, never a whole credentials block.
+string CredentialInput(string value,string name){
+ value=TrimInput(value);
+ if(StringFind(value,name+"=")==0)value=TrimInput(StringSubstr(value,StringLen(name)+1));
+ return value;
+}
+int InvalidParameter(string message){
+ Print("CopyTrading 1.01 : ",message);
+ Alert("CopyTrading : ",message,"\nCorrigez les données d’entrée puis rattachez l’EA.");
+ return INIT_PARAMETERS_INCORRECT;
+}
+bool HexKey(string value){
+ if(StringLen(value)!=64)return false;
+ for(int i=0;i<64;i++){ushort c=StringGetCharacter(value,i);if(!((c>=48&&c<=57)||(c>=97&&c<=102)))return false;}
+ return true;
+}
 
 string Esc(string value){StringReplace(value,"\\","\\\\");StringReplace(value,"\"","\\\"");StringReplace(value,"\r"," ");StringReplace(value,"\n"," ");StringReplace(value,"\t"," ");return value;}
 string Str(string json,string key){
@@ -46,7 +65,7 @@ bool SafeId(string value){
 }
 string Account(){return IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));}
 string Mode(){return AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO?"demo":"real";}
-string Prefix(){return "Copy_"+AgentId+"_"+Account()+"_";}
+string Prefix(){return "Copy_"+effectiveAgentId+"_"+Account()+"_";}
 string Positions(){
  string result="[";int count=0,total=PositionsTotal();
  for(int i=0;i<total;i++){
@@ -162,21 +181,36 @@ void Sync(){
  payload+="}";
  char body[],response[];string headers;
  StringToCharArray(payload,body,0,WHOLE_ARRAY,CP_UTF8);ArrayResize(body,ArraySize(body)-1);
- int code=WebRequest("POST",ApiBaseUrl+"/api/copytrading/agent","Content-Type: application/json\r\nX-Copy-Agent-Id: "+AgentId+"\r\nX-Copy-Agent-Key: "+AgentKey+"\r\n",5000,body,response,headers);
+ int code=WebRequest("POST",effectiveApiUrl+"/api/copytrading/agent","Content-Type: application/json\r\nX-Copy-Agent-Id: "+effectiveAgentId+"\r\nX-Copy-Agent-Key: "+effectiveAgentKey+"\r\n",5000,body,response,headers);
  string json=CharArrayToString(response,0,-1,CP_UTF8);
  if(code==200){ackId="";ackStatus="";ackMessage="";if(StringFind(json,"\"command\":{")>=0)Execute(json);Comment("CopyTrading ",Role==MASTER?"MASTER":"SLAVE"," connecté\n",Account()," / ",AccountInfoString(ACCOUNT_SERVER));}
  else {Print("Copy API HTTP=",code," ",StringSubstr(json,0,300));Comment("CopyTrading : connexion refusée / indisponible. HTTP ",code);}
  busy=false;
 }
 int OnInit(){
- if(!SafeId(AgentId)||StringLen(AgentKey)!=64||PollSeconds<1||TerminalMaxLot<=0||TerminalMaxTotalLots<=0||TerminalLossLimitPercent<=0||TerminalLossLimitPercent>100){Print("Paramètres copytrading invalides");return INIT_PARAMETERS_INCORRECT;}
- if(StringFind(ApiBaseUrl,"https://")!=0&&StringFind(ApiBaseUrl,"http://localhost:")!=0){Print("HTTPS requis");return INIT_PARAMETERS_INCORRECT;}
- if(Role==SLAVE&&AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING){Print("Slave : compte hedging requis");return INIT_PARAMETERS_INCORRECT;}
+ effectiveAgentId=CredentialInput(AgentId,"AgentId");
+ effectiveAgentKey=CredentialInput(AgentKey,"AgentKey");
+ effectiveApiUrl=TrimInput(ApiBaseUrl);
+ while(StringLen(effectiveApiUrl)>0&&StringSubstr(effectiveApiUrl,StringLen(effectiveApiUrl)-1)=="/")effectiveApiUrl=StringSubstr(effectiveApiUrl,0,StringLen(effectiveApiUrl)-1);
+ if(!SafeId(effectiveAgentId))return InvalidParameter("AgentId invalide : UUID de 36 caractères attendu, reçu "+IntegerToString(StringLen(effectiveAgentId))+" caractères. Copiez uniquement la valeur AgentId du terminal.");
+ if(!HexKey(effectiveAgentKey))return InvalidParameter("AgentKey invalide : 64 caractères (0-9, a-f) attendus, reçu "+IntegerToString(StringLen(effectiveAgentKey))+" caractères. Copiez la clé du terminal, pas la clé administrateur ni les deux lignes ensemble.");
+ if(Role!=MASTER&&Role!=SLAVE)return InvalidParameter("Role doit être MASTER ou SLAVE.");
+ if(PollSeconds<1)return InvalidParameter("PollSeconds doit être au moins égal à 1.");
+ if(StringFind(effectiveApiUrl,"https://")!=0&&StringFind(effectiveApiUrl,"http://localhost:")!=0)return InvalidParameter("ApiBaseUrl doit être l’URL HTTPS de l’application, par exemple https://derivbot-qnwz.onrender.com.");
+ // Execution limits apply to followers; the master only reports positions.
+ if(Role==SLAVE){
+  if(!MathIsValidNumber(TerminalMaxLot)||TerminalMaxLot<=0)return InvalidParameter("TerminalMaxLot doit être supérieur à 0 sur un suiveur.");
+  if(!MathIsValidNumber(TerminalMaxTotalLots)||TerminalMaxTotalLots<=0)return InvalidParameter("TerminalMaxTotalLots doit être supérieur à 0 sur un suiveur.");
+  if(!MathIsValidNumber(TerminalLossLimitPercent)||TerminalLossLimitPercent<=0||TerminalLossLimitPercent>100)return InvalidParameter("TerminalLossLimitPercent doit être supérieur à 0 et au maximum égal à 100 sur un suiveur.");
+  if(DeviationPoints<0)return InvalidParameter("DeviationPoints doit être positif ou nul sur un suiveur.");
+  if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)return InvalidParameter("SLAVE exige un compte hedging. Pour le compte source, choisissez MASTER.");
+ }
  lockHandle=FileOpen(Prefix()+"agent.lock",FILE_READ|FILE_WRITE|FILE_BIN|FILE_COMMON);
  if(lockHandle==INVALID_HANDLE){Print("Un autre EA utilise cette identité sur cette machine");return INIT_FAILED;}
  startingEquity=AccountInfoDouble(ACCOUNT_EQUITY);
  sessionId=IntegerToString((long)TimeLocal())+"-"+IntegerToString((long)GetMicrosecondCount())+"-"+IntegerToString(ChartID());
- if(!EventSetTimer(PollSeconds)){FileClose(lockHandle);return INIT_FAILED;}
+ if(!EventSetTimer(PollSeconds)){Print("CopyTrading : impossible de démarrer le minuteur. Erreur ",GetLastError());FileClose(lockHandle);lockHandle=INVALID_HANDLE;return INIT_FAILED;}
+ Print("CopyTrading 1.01 : paramètres validés, connexion au serveur au prochain cycle.");
  return INIT_SUCCEEDED;
 }
 void OnTimer(){Sync();}

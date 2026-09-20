@@ -8,6 +8,11 @@ export function Mt5CopyTradingPanel({onActive}:{onActive:(active:boolean)=>void}
  const [adminKey,setAdminKey]=useState("");const keyRef=useRef("");
  const [data,setData]=useState<Snapshot|null>(null);const [error,setError]=useState("");const [busy,setBusy]=useState(false);
  const [issued,setIssued]=useState<{id:string;token:string}|null>(null);
+ const [copyNotice,setCopyNotice]=useState("");
+ async function copyCredential(name:"AgentId"|"AgentKey",value:string){
+  try{await navigator.clipboard.writeText(value);setCopyNotice(`${name} copié : collez-le dans le champ ${name} de MT5.`);}
+  catch{setCopyNotice("Copie impossible : sélectionnez et copiez la valeur du champ correspondant.");}
+ }
  const [form,setForm]=useState({label:"",account:"",server:"",role:"slave",mode:"demo"});
  const [settings,setSettings]=useState(defaults);const [symbols,setSymbols]=useState("{}");const [editing,setEditing]=useState<string|null>(null);
  const actionQueue=useRef<Promise<unknown>>(Promise.resolve());const queued=useRef(0);
@@ -26,7 +31,7 @@ export function Mt5CopyTradingPanel({onActive}:{onActive:(active:boolean)=>void}
   queued.current++;setBusy(true);version.current++;
   const task=actionQueue.current.then(async()=>{
    try{const response=await fetch("/api/copytrading/admin",{method:"POST",headers:{"Content-Type":"application/json","x-copy-admin-key":keyRef.current},body:JSON.stringify(input),signal:AbortSignal.timeout(15000)});const result=await response.json();if(!response.ok)throw new Error(result.error||"Action refusée");
-    accept(result);setError("");if(result.result?.token)setIssued(result.result);return true;
+    accept(result);setError("");if(result.result?.token){setIssued(result.result);setCopyNotice("");}return true;
    }catch(e){setError(e instanceof Error?e.message:"Action non confirmée");return false;}
    finally{queued.current--;version.current++;setBusy(queued.current>0);}
   });
@@ -49,7 +54,7 @@ export function Mt5CopyTradingPanel({onActive}:{onActive:(active:boolean)=>void}
     <div className="copy-actions">{master&&<button disabled={busy||data.enabled||slaves.some(a=>a.managedCopies>0||a.pending)} onClick={()=>void mutate({action:"remove",id:master.id})}>Révoquer le master</button>}<button disabled={busy||!master?.online||data.enabled} onClick={()=>void mutate({action:"switch",enabled:true,copyExisting})}>Démarrer la copie</button><button disabled={busy||!data.enabled} onClick={()=>void mutate({action:"switch",enabled:false})}>Pause des nouvelles copies</button></div>
     <small>La pause bloque les nouvelles expositions. Les fermetures et réductions des copies existantes restent suivies. Une commande déjà exécutée n’est pas annulée. La copie continue lorsque vous quittez cette page.</small>
    </section>
-   {issued&&<section className="panel copy-issued"><h3>Identifiants du terminal — affichés une seule fois</h3><p>Copiez ces deux valeurs dans les paramètres de l’EA du compte concerné.</p><label>AgentId<input readOnly value={issued.id}/></label><label>AgentKey<input readOnly type="password" value={issued.token}/></label><button onClick={async()=>{try{await navigator.clipboard.writeText(`AgentId=${issued.id}\nAgentKey=${issued.token}`);}catch{setError("Copie impossible : sélectionnez les valeurs manuellement.");}}}>Copier les identifiants</button><button onClick={()=>setIssued(null)}>J’ai enregistré ces identifiants</button></section>}
+   {issued&&<section className="panel copy-issued"><h3>Identifiants du terminal — affichés une seule fois</h3><p>Copiez chaque valeur séparément dans le champ du même nom dans MT5. Ne collez pas les deux identifiants dans un seul champ.</p><label>AgentId · 36 caractères<input readOnly value={issued.id} onFocus={e=>e.target.select()}/></label><button onClick={()=>void copyCredential("AgentId",issued.id)}>Copier AgentId</button><label>AgentKey · 64 caractères<input readOnly type="password" value={issued.token} onFocus={e=>e.target.select()}/></label><button onClick={()=>void copyCredential("AgentKey",issued.token)}>Copier AgentKey</button><p role="status">{copyNotice}</p><button onClick={()=>{setIssued(null);setCopyNotice("");}}>J’ai enregistré ces identifiants</button></section>}
    <section className="panel"><h3>{editing?"Paramètres du suiveur":"Enregistrer un terminal"}</h3><form className="copy-registration" onSubmit={async e=>{e.preventDefault();let mapping;try{mapping=JSON.parse(symbols);}catch{setError("Le mapping de symboles doit être un objet JSON.");return;}
     const ok=await mutate(editing?{action:"settings",id:editing,settings:{...settings,symbols:mapping}}:{action:"register",...form,settings:{...settings,symbols:mapping}});if(ok){setEditing(null);setForm({...form,label:"",account:""});setSettings(defaults);setSymbols("{}");}
    }}>
